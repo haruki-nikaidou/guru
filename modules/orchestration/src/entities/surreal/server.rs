@@ -13,3 +13,12 @@ pub struct ServerEntity {
     pub comment: String,
     pub position: CanvasUiPosition,
 }
+
+table_record!(ServerIpRecordId, "ip_record");
+
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ServerIpRecordEntity {
+    pub id: ServerIpRecordId,
+    pub server: ServerId,
+    pub ip: String,
+}

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 # Internal
-rpguru_sdk  = { path = "../../lib/rpguru_sdk" }
+rpguru_sdk = { path = "../../lib/rpguru_sdk" }
 newtype_record_id = { path = "../../lib/newtype_record_id" }
 
 # Framework
@@ -17,6 +17,7 @@ tokio = { workspace = true }
 
 # Persistence
 surrealdb = { workspace = true }
+surrealdb-types = { workspace = true }
 redis = { workspace = true }
 
 # Messaging
