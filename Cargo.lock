@@ -2737,6 +2737,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "newtype_record_id"
+version = "0.1.0-alpha"
+
+[[package]]
 name = "noisy_float"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3086,6 +3090,7 @@ dependencies = [
  "compact_str 0.9.1",
  "itertools 0.14.0",
  "kanau",
+ "newtype_record_id",
  "prost",
  "prost-types",
  "redis",

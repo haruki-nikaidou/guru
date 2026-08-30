@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 # Internal
 rpguru_sdk  = { path = "../../lib/rpguru_sdk" }
+newtype_record_id = { path = "../../lib/newtype_record_id" }
 
 # Framework
 wakuwaku = { workspace = true }
