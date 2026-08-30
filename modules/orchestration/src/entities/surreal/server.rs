@@ -21,4 +21,5 @@ pub struct ServerIpRecordEntity {
     pub id: ServerIpRecordId,
     pub server: ServerId,
     pub ip: String,
+    pub country: String,
 }
