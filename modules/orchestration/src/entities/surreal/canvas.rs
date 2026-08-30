@@ -9,3 +9,9 @@ pub struct CanvasEntity {
     pub name: String,
     pub description: String,
 }
+
+#[derive(Debug, Clone, SurrealValue)]
+pub struct CanvasUiPosition {
+    pub x: i64,
+    pub y: i64,
+}
