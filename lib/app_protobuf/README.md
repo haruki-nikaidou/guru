@@ -11,7 +11,7 @@ Shared crate holding the generated gRPC/protobuf types for the whole workspace.
 - Hosts conversions between protobuf types and domain types (`sqlx`, `time`,
   `uuid`, …) so every consumer shares one implementation.
 
-Both the [`app-server`](../../bin/app-server) binary and the business modules
+Both the [`guru-master`](../../bin/guru-master) binary and the business modules
 under [`modules/`](../../modules) depend on this crate.
 
 ## Adding a service

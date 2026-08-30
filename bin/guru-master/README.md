@@ -1,4 +1,4 @@
-# `app-server`
+# `guru-master`
 
 The main application server binary. It composes the business modules under
 [`modules/`](../../modules) and runs them behind one or more **workers**.

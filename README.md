@@ -58,7 +58,7 @@ typescript/         # Bun workspace for frontend / TypeScript packages
 
 ### How the pieces fit
 
-`bin/app-server` selects a *worker* (gRPC server, AMQP consumer, cron executor,
+`bin/guru-master` selects a *worker* (gRPC server, AMQP consumer, cron executor,
 REST/webhook gateway) at startup, builds shared dependencies, and hands control
 to the modules. Each module owns its slice of behaviour and talks to the others
 only through gRPC calls or AMQP events — never by reaching into their internals.

@@ -120,7 +120,7 @@ src/
 - Implement the protobuf service trait from `app_protobuf`.
 - Handlers are thin adapters: decode request → call a service → encode reply.
 - **No business logic** — if a handler grows rules, move them into a service.
-- Re-export each concrete service type from `rpc/mod.rs` so `app-server` can
+- Re-export each concrete service type from `rpc/mod.rs` so `guru-master` can
   mount it.
 
 ### `config`
@@ -156,7 +156,7 @@ src/
 3. Define tables in `migrations/` and the API in `proto/` (register it in
    `app_protobuf`).
 4. Implement, from the inside out: `entities` → `services` → `rpc`/`hooks`.
-5. Wire the new services/hooks into `bin/app-server`'s workers.
+5. Wire the new services/hooks into `bin/guru-master`'s workers.
 6. Keep `config` values seedable from `bin/manage-tool`.
 
 ## Frontend / TypeScript

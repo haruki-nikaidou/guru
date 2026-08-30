@@ -1,5 +1,5 @@
 [package]
-name = "app-server"
+name = "guru-master"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

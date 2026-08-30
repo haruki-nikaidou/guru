@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["bin/app-server", "bin/manage-tool", "lib/app_protobuf","modules/base"]
+members = [
+    "bin/guru-master",
+    "bin/guru-worker",
+    "bin/manage-tool",
+    "lib/app_protobuf",
+    "modules/base"
+]
 
 [workspace.package]
 version = "0.1.0-alpha"

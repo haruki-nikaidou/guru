@@ -14,7 +14,7 @@ request path.
 
 ## Why a separate binary
 
-Keeping administrative actions out of [`app-server`](../app-server) means the
+Keeping administrative actions out of [`guru-master`](../guru-master) means the
 server image stays focused on serving traffic, while destructive or
 infrequent operations live in a tool run deliberately by an operator (or a
 deployment job). It reuses the same modules and entities, so commands share the
