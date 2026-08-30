@@ -1,4 +1,4 @@
-# `app_protobuf`
+# `rpguru_sdk`
 
 Shared crate holding the generated gRPC/protobuf types for the whole workspace.
 

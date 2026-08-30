@@ -117,7 +117,7 @@ src/
 
 ### `rpc`
 
-- Implement the protobuf service trait from `app_protobuf`.
+- Implement the protobuf service trait from `rpguru_sdk`.
 - Handlers are thin adapters: decode request → call a service → encode reply.
 - **No business logic** — if a handler grows rules, move them into a service.
 - Re-export each concrete service type from `rpc/mod.rs` so `guru-master` can
@@ -143,7 +143,7 @@ src/
   on a feature module, and modules must not depend on each other's internals —
   communicate via gRPC or AMQP events.
 - **Protobuf:** `proto/` is the single source of truth for the API. Add `.proto`
-  files there, register them in `app_protobuf`'s `build.rs` (Rust side), and
+  files there, register them in `rpguru_sdk`'s `build.rs` (Rust side), and
   regenerate the TypeScript side with `bun run generate:proto`. Never hand-edit
   or duplicate generated code.
 - **Migrations:** every schema change is a pair of `.up.sql` / `.down.sql` files
@@ -154,7 +154,7 @@ src/
 1. Copy the `modules/base` directory layout into `modules/<name>`.
 2. Add the crate to the workspace `members` in the root `Cargo.toml`.
 3. Define tables in `migrations/` and the API in `proto/` (register it in
-   `app_protobuf`).
+   `rpguru_sdk`).
 4. Implement, from the inside out: `entities` → `services` → `rpc`/`hooks`.
 5. Wire the new services/hooks into `bin/guru-master`'s workers.
 6. Keep `config` values seedable from `bin/manage-tool`.
@@ -167,7 +167,7 @@ everything — install, scripts, running — not npm or pnpm.
 
 ### `app-protobuf` — generated API code, shared once
 
-`typescript/app-protobuf` is the TypeScript counterpart of the `app_protobuf`
+`typescript/app-protobuf` is the TypeScript counterpart of the `rpguru_sdk`
 Rust crate: it holds the gRPC/protobuf code generated from `proto/`, and
 **nothing else**. Every frontend package depends on `app-protobuf` instead of
 generating (and duplicating) its own client — this is the whole point of the

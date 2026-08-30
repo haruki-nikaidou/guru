@@ -4,8 +4,11 @@ members = [
     "bin/guru-master",
     "bin/guru-worker",
     "bin/manage-tool",
-    "lib/app_protobuf",
-    "modules/base"
+    "lib/rpguru_sdk",
+    "modules/auth",
+    "modules/base",
+    "modules/notify",
+    "modules/orchestration"
 ]
 
 [workspace.package]
@@ -19,7 +22,7 @@ license = "MIT"
 tokio = { version = "1.49", features = ["full"] }
 
 # Framework
-wakuwaku = { version = "0.2", features = ["tracing-otel", "tonic", "sqlx"] }
+wakuwaku = { version = "0.2", features = ["tracing-otel", "tonic", "surreal"] }
 kanau = { version = "0.5", features = [
     "message",
     "rkyv",
@@ -27,18 +30,7 @@ kanau = { version = "0.5", features = [
     "serde_json",
 ] }
 amqprs = { version = "2.1", features = ["uriparse", "urispec"] }
-sqlx = { version = "0.9", features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "time",
-    "derive",
-    "macros",
-    "uuid",
-    "rust_decimal",
-    "json",
-    "ipnetwork",
-] }
+surrealdb = { version = "3.2", features = ["protocol-ws"] }
 redis = { version = "1.0", features = ["tokio-comp", "uuid", "json"] }
 axum = { version = "0.8", features = ["macros", "form"] }
 tower = "0.5"

@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 # Internal
 base = { path = "../../modules/base" }
-app_protobuf = { path = "../../lib/app_protobuf" }
+rpguru_sdk = { path = "../../lib/rpguru_sdk" }
 
 # Runtime
 tokio = { workspace = true }
@@ -24,7 +24,7 @@ tower = { workspace = true }
 amqprs = { workspace = true }
 
 # Shared dependencies
-sqlx = { workspace = true }
+surrealdb = { workspace = true }
 redis = { workspace = true }
 
 # Configuration
