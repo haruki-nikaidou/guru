@@ -10,7 +10,7 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
-time = { workspace = true }
+chrono = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

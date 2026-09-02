@@ -284,6 +284,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "amqprs",
  "bytes",
+ "chrono",
  "compact_str 0.9.1",
  "itertools 0.14.0",
  "kanau",
@@ -299,7 +300,6 @@ dependencies = [
  "smallvec",
  "surrealdb",
  "surrealdb-types",
- "time",
  "tokio",
  "tonic",
  "tonic-prost",
@@ -408,6 +408,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "amqprs",
  "bytes",
+ "chrono",
  "compact_str 0.9.1",
  "itertools 0.14.0",
  "kanau",
@@ -421,7 +422,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "surrealdb",
- "time",
  "tokio",
  "tonic",
  "tonic-prost",
@@ -1089,9 +1089,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "deunicode"
@@ -2757,6 +2754,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "amqprs",
  "bytes",
+ "chrono",
  "compact_str 0.9.1",
  "itertools 0.14.0",
  "kanau",
@@ -2770,7 +2768,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "surrealdb",
- "time",
  "tokio",
  "tonic",
  "tonic-prost",
@@ -3089,6 +3086,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "amqprs",
  "bytes",
+ "chrono",
  "compact_str 0.9.1",
  "itertools 0.14.0",
  "kanau",
@@ -3104,7 +3102,6 @@ dependencies = [
  "smallvec",
  "surrealdb",
  "surrealdb-types",
- "time",
  "tokio",
  "tonic",
  "tonic-prost",
@@ -4110,9 +4107,9 @@ checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
 name = "rpguru_sdk"
 version = "0.1.0-alpha"
 dependencies = [
+ "chrono",
  "prost",
  "prost-types",
- "time",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

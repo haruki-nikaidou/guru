@@ -62,7 +62,7 @@ compact_str = { version = "0.9.0", features = [
     "bytes",
     "smallvec",
 ] }
-time = { version = "0.3", features = ["serde", "serde-human-readable"] }
+chrono = { version = "0.4", features = ["serde"] }
 url = { version = "2.5", features = ["serde"] }
 smallvec = { version = "1.14.0", features = [
     "serde",

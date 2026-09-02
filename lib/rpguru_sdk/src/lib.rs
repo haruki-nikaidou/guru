@@ -23,8 +23,8 @@
 //! }
 //! ```
 //!
-//! Keep conversions between protobuf types and domain types (`sqlx`, `time`,
-//! `uuid`, …) in this crate too, so every consumer shares one implementation.
+//! Keep conversions between protobuf types and domain types (`chrono`, `uuid`,
+//! …) in this crate too, so every consumer shares one implementation.
 
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
