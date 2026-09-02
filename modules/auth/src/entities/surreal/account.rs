@@ -1,7 +1,7 @@
 use newtype_record_id::table_record;
 use surrealdb_types::SurrealValue;
 
-table_record!(AccountId, "account");
+table_record!(AccountId, "auth_account");
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct AccountEntity {
