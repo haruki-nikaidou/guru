@@ -28,13 +28,36 @@ pub enum NodeSpec {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
-pub struct PodConfig {}
+pub struct PodConfig {
+    pub listen_address: String,
+    pub listen_port: u16,
+}
 
 #[derive(Debug, Clone, SurrealValue)]
-pub struct EntryConfig {}
+pub struct EntryConfig {
+    pub listen_address_override: Option<String>,
+    pub listen_port_override: Option<u16>,
+    pub receive_proxy_protocol: Option<ProxyProtocolVersion>,
+}
+
+#[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
+pub enum ProxyProtocolVersion {
+    V1,
+    V2,
+}
 
 #[derive(Debug, Clone, SurrealValue)]
-pub struct RelayConfig {}
+pub struct RelayConfig {
+    pub proxy_protocol_negotiation: ProxyProtocolVersion,
+    pub protocol: RelayProtocol,
+}
+
+#[derive(Debug, Clone, Copy, SurrealValue, PartialEq, Eq)]
+pub enum RelayProtocol {
+    TcpRaw,
+    TcpTls,
+    Quic,
+}
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct ExitConfig {}
