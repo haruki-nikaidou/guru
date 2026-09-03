@@ -35,9 +35,12 @@ pub struct PodConfig {
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct EntryConfig {
-    pub listen_address_override: Option<String>,
-    pub listen_port_override: Option<u16>,
     pub receive_proxy_protocol: Option<ProxyProtocolVersion>,
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+pub struct TlsConfig {
 }
 
 #[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
@@ -50,6 +53,8 @@ pub enum ProxyProtocolVersion {
 pub struct RelayConfig {
     pub proxy_protocol_negotiation: ProxyProtocolVersion,
     pub protocol: RelayProtocol,
+    pub override_ip_address: Option<String>,
+    pub override_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, SurrealValue, PartialEq, Eq)]
@@ -60,7 +65,10 @@ pub enum RelayProtocol {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
-pub struct ExitConfig {}
+pub struct ExitConfig {
+    pub destination: String,
+    pub pass_proxy_protocol: Option<ProxyProtocolVersion>,
+}
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct LoadBalanceDistributeConfig {}
