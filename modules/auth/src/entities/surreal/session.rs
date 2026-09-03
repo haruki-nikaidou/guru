@@ -1,5 +1,5 @@
 use super::account::AccountId;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use newtype_record_id::table_record;
 use surrealdb_types::SurrealValue;
 
@@ -10,6 +10,6 @@ pub struct SessionEntity {
     pub id: SessionId,
     pub account_id: AccountId,
     pub user_agent: String,
-    pub created_at: NaiveDateTime,
-    pub last_active_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
+    pub last_active_at: DateTime<Utc>,
 }
