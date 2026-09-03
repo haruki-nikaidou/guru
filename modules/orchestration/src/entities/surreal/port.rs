@@ -2,7 +2,7 @@ use crate::entities::surreal::node::NodeId;
 use newtype_record_id::table_record;
 use surrealdb::types::SurrealValue;
 
-table_record!(PortId, "port");
+table_record!(PortId, "orchestration_port");
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct PortEntity {

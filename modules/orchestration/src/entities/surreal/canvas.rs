@@ -1,7 +1,7 @@
 use newtype_record_id::table_record;
 use surrealdb::types::SurrealValue;
 
-table_record!(CanvasId, "canvas");
+table_record!(CanvasId, "orchestration_canvas");
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct CanvasEntity {

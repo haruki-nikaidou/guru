@@ -3,7 +3,7 @@ use crate::entities::surreal::server::ServerId;
 use newtype_record_id::table_record;
 use surrealdb::types::SurrealValue;
 
-table_record!(NodeId, "node");
+table_record!(NodeId, "orchestration_node");
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct NodeEntity {
