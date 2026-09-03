@@ -1,7 +1,7 @@
-use newtype_record_id::table_record;
-use surrealdb::types::SurrealValue;
 use crate::entities::surreal::canvas::{CanvasId, CanvasUiPosition};
 use crate::entities::surreal::server::ServerId;
+use newtype_record_id::table_record;
+use surrealdb::types::SurrealValue;
 
 table_record!(NodeId, "node");
 

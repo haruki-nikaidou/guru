@@ -1,6 +1,6 @@
-use surrealdb::types::SurrealValue;
-use newtype_record_id::table_record;
 use crate::entities::surreal::port::PortId;
+use newtype_record_id::table_record;
+use surrealdb::types::SurrealValue;
 
 table_record!(EdgeConnectionId, "edge_connection");
 
