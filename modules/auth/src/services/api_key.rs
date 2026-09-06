@@ -35,7 +35,7 @@ pub struct CreatedApiKey {
 impl Processor<CreateApiKey> for ApiKeyService {
     type Output = CreatedApiKey;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:CreateApiKey", skip_all, err)]
     async fn process(&self, input: CreateApiKey) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageApiKeys)?;
         let secret = generate_api_key_secret();
@@ -61,7 +61,7 @@ pub struct ListApiKeys {
 impl Processor<ListApiKeys> for ApiKeyService {
     type Output = Vec<ApiKeyOmitSecret>;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:ListApiKeys", skip_all, err)]
     async fn process(&self, input: ListApiKeys) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageApiKeys)?;
         let keys = self
@@ -83,7 +83,7 @@ pub struct RevokeApiKey {
 impl Processor<RevokeApiKey> for ApiKeyService {
     type Output = ();
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:RevokeApiKey", skip_all, err)]
     async fn process(&self, input: RevokeApiKey) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageApiKeys)?;
         let key = self
@@ -110,7 +110,7 @@ pub struct AuthenticateApiKey {
 impl Processor<AuthenticateApiKey> for ApiKeyService {
     type Output = Option<Identity>;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:AuthenticateApiKey", skip_all, err)]
     async fn process(&self, input: AuthenticateApiKey) -> Result<Self::Output, Self::Error> {
         let digest = sha256_hex(&input.secret);
         let key = match self.db.process(FindApiKeyByDigest { secret_sha256: digest }).await? {

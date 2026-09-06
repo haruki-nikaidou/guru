@@ -26,7 +26,7 @@ pub struct CreateNewApiKey {
 impl Processor<CreateNewApiKey> for SurrealProcessor {
     type Output = ApiKeyId;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:CreateNewApiKey", skip_all, err)]
     async fn process(&self, input: CreateNewApiKey) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -51,7 +51,7 @@ pub struct FindApiKeyByDigest {
 impl Processor<FindApiKeyByDigest> for SurrealProcessor {
     type Output = Option<ApiKeyEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:FindApiKeyByDigest", skip_all, err)]
     async fn process(&self, input: FindApiKeyByDigest) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -69,7 +69,7 @@ pub struct FindApiKeyById {
 impl Processor<FindApiKeyById> for SurrealProcessor {
     type Output = Option<ApiKeyEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:FindApiKeyById", skip_all, err)]
     async fn process(&self, input: FindApiKeyById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -95,7 +95,7 @@ pub struct ApiKeyOmitSecret {
 impl Processor<ListApiKeysByOwner> for SurrealProcessor {
     type Output = Vec<ApiKeyOmitSecret>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:ListApiKeysByOwner", skip_all, err)]
     async fn process(&self, input: ListApiKeysByOwner) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -113,7 +113,7 @@ pub struct DeleteApiKey {
 impl Processor<DeleteApiKey> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:DeleteApiKey", skip_all, err)]
     async fn process(&self, input: DeleteApiKey) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE $id")
@@ -131,7 +131,7 @@ pub struct DeleteApiKeysByOwner {
 impl Processor<DeleteApiKeysByOwner> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:DeleteApiKeysByOwner", skip_all, err)]
     async fn process(&self, input: DeleteApiKeysByOwner) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE api_key WHERE owner = $owner")

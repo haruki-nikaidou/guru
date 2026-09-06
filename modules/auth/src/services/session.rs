@@ -53,7 +53,7 @@ pub enum LoginResult {
 impl Processor<Login> for SessionService {
     type Output = LoginResult;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:Login", skip_all, err)]
     async fn process(&self, input: Login) -> Result<Self::Output, Self::Error> {
         let email = normalize_email(&input.email);
         let account = self.db.process(FindAccountByEmail { email: &email }).await?;
@@ -94,7 +94,7 @@ pub struct AuthenticateSession {
 impl Processor<AuthenticateSession> for SessionService {
     type Output = Option<Identity>;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:AuthenticateSession", skip_all, err)]
     async fn process(&self, input: AuthenticateSession) -> Result<Self::Output, Self::Error> {
         let session = match self
             .db
@@ -147,7 +147,7 @@ pub struct Logout {
 impl Processor<Logout> for SessionService {
     type Output = ();
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:Logout", skip_all, err)]
     async fn process(&self, input: Logout) -> Result<Self::Output, Self::Error> {
         self.db
             .process(DeleteSession {

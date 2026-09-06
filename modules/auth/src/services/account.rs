@@ -44,7 +44,7 @@ pub enum RegisterResult {
 impl Processor<RegisterAccount> for AccountService {
     type Output = RegisterResult;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:RegisterAccount", skip_all, err)]
     async fn process(&self, input: RegisterAccount) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageAccounts)?;
         let email = normalize_email(&input.email);
@@ -80,7 +80,7 @@ pub struct ListAccounts {
 impl Processor<ListAccounts> for AccountService {
     type Output = Vec<AccountEntity>;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:ListAccounts", skip_all, err)]
     async fn process(&self, input: ListAccounts) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageAccounts)?;
         let accounts = self.db.process(ListAccountsEntity).await?;
@@ -98,7 +98,7 @@ pub struct SetAccountRole {
 impl Processor<SetAccountRole> for AccountService {
     type Output = ();
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:SetAccountRole", skip_all, err)]
     async fn process(&self, input: SetAccountRole) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageAccounts)?;
         self.db
@@ -120,7 +120,7 @@ pub struct DeleteAccount {
 impl Processor<DeleteAccount> for AccountService {
     type Output = ();
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:DeleteAccount", skip_all, err)]
     async fn process(&self, input: DeleteAccount) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ManageAccounts)?;
         self.db
@@ -156,7 +156,7 @@ pub enum ChangePasswordResult {
 impl Processor<ChangeOwnPassword> for AccountService {
     type Output = ChangePasswordResult;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:ChangeOwnPassword", skip_all, err)]
     async fn process(&self, input: ChangeOwnPassword) -> Result<Self::Output, Self::Error> {
         input.actor.require_human()?;
         let account = self
@@ -203,7 +203,7 @@ pub enum ChangeEmailResult {
 impl Processor<ChangeOwnEmail> for AccountService {
     type Output = ChangeEmailResult;
     type Error = wakuwaku::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Service:ChangeOwnEmail", skip_all, err)]
     async fn process(&self, input: ChangeOwnEmail) -> Result<Self::Output, Self::Error> {
         input.actor.require_human()?;
         let account = self

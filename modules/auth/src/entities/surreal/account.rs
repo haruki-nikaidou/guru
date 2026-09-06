@@ -32,7 +32,7 @@ pub struct FindAccountByEmail<'a> {
 impl<'a> Processor<FindAccountByEmail<'a>> for SurrealProcessor {
     type Output = Option<AccountEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:FindAccountByEmail", skip_all, err)]
     async fn process(&self, input: FindAccountByEmail<'a>) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -52,7 +52,7 @@ pub struct CreateAccount {
 impl Processor<CreateAccount> for SurrealProcessor {
     type Output = AccountEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:CreateAccount", skip_all, err)]
     async fn process(&self, input: CreateAccount) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -78,7 +78,7 @@ pub struct UpdateAccountPassword {
 impl Processor<UpdateAccountPassword> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateAccountPassword", skip_all, err)]
     async fn process(&self, input: UpdateAccountPassword) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $id SET password_hash = $password_hash")
@@ -98,7 +98,7 @@ pub struct UpdateAccountEmail {
 impl Processor<UpdateAccountEmail> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateAccountEmail", skip_all, err)]
     async fn process(&self, input: UpdateAccountEmail) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $id SET email = $new_email")
@@ -117,7 +117,7 @@ pub struct FindAccountById {
 impl Processor<FindAccountById> for SurrealProcessor {
     type Output = Option<AccountEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:FindAccountById", skip_all, err)]
     async fn process(&self, input: FindAccountById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -133,7 +133,7 @@ pub struct ListAccounts;
 impl Processor<ListAccounts> for SurrealProcessor {
     type Output = Vec<AccountEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:ListAccounts", skip_all, err)]
     async fn process(&self, _input: ListAccounts) -> Result<Self::Output, Self::Error> {
         let mut resp = self.db().query("SELECT * FROM auth_account").await?;
         resp.take::<Vec<AccountEntity>>(0)
@@ -148,7 +148,7 @@ pub struct UpdateAccountRole {
 impl Processor<UpdateAccountRole> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateAccountRole", skip_all, err)]
     async fn process(&self, input: UpdateAccountRole) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $id SET role = $role")
@@ -167,7 +167,7 @@ pub struct DeleteAccount {
 impl Processor<DeleteAccount> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:DeleteAccount", skip_all, err)]
     async fn process(&self, input: DeleteAccount) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE $id")

@@ -23,7 +23,7 @@ pub struct FindSessionById {
 impl Processor<FindSessionById> for SurrealProcessor {
     type Output = Option<SessionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:FindSessionById", skip_all, err)]
     async fn process(&self, input: FindSessionById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -46,7 +46,7 @@ pub struct CreateSession {
 impl Processor<CreateSession> for SurrealProcessor {
     type Output = SessionEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:CreateSession", skip_all, err)]
     async fn process(&self, input: CreateSession) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -71,7 +71,7 @@ pub struct DeleteSession {
 impl Processor<DeleteSession> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:DeleteSession", skip_all, err)]
     async fn process(&self, input: DeleteSession) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE type::record('auth_session', $id)")
@@ -90,7 +90,7 @@ pub struct UpdateSession {
 impl Processor<UpdateSession> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateSession", skip_all, err)]
     async fn process(&self, input: UpdateSession) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE type::record('auth_session', $id) SET last_active_at = $last_active_at")
@@ -109,7 +109,7 @@ pub struct DeleteSessionsByAccount {
 impl Processor<DeleteSessionsByAccount> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(name = "Query:DeleteSessionsByAccount", skip_all, err)]
     async fn process(&self, input: DeleteSessionsByAccount) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE auth_session WHERE account_id = $account_id")
