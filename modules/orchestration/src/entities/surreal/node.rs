@@ -1,5 +1,5 @@
 use crate::entities::surreal::canvas::{CanvasId, CanvasUiPosition};
-use crate::entities::surreal::port::PortKind;
+use crate::entities::surreal::port::{PortEntity, PortKind};
 use crate::entities::surreal::server::ServerId;
 use newtype_record_id::table_record;
 use surrealdb::types::SurrealValue;
@@ -105,4 +105,9 @@ pub enum LoadBalanceMode {
     Random,
     IpHash,
     Fallback,
+}
+
+pub struct NodeWithPorts {
+    pub node: NodeEntity,
+    pub port_records: Vec<PortEntity>
 }

@@ -25,3 +25,8 @@ pub struct ServerIpRecordEntity {
     pub current_unique_key: Option<String>,
     pub country: String,
 }
+
+pub struct ServerWithIp {
+    pub server: ServerEntity,
+    pub ip_records: Vec<ServerIpRecordEntity>
+}
