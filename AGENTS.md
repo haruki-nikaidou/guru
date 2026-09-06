@@ -23,13 +23,13 @@ Do not invent parallel abstractions.
 ```
 bin/          # Rust binaries — wiring only, no business logic
   app-server/     # runs modules behind pluggable workers (gRPC, consumer, cron, ...)
-  manage-tool/    # CLI: migrations, config seeding, admin tasks
+  manage-tool/    # CLI: admin bootstrap (create-admin), config seeding, maintenance
 lib/
   app_protobuf/   # generated gRPC/protobuf types + shared conversions (Rust)
 modules/          # business logic, one crate per feature
   base/           # foundational + template module
 proto/            # protobuf definitions (grouped by module) — the single API source
-migrations/       # SQLx migrations (.up.sql / .down.sql)
+database/         # SurrealDB schema + seed + tests (managed by surrealkit)
 typescript/       # Bun workspace: all frontend / TypeScript packages
   app-protobuf/   # generated gRPC/protobuf TypeScript code (shared)
 package.json      # root of the Bun workspace (workspaces: ["typescript/*"])
@@ -50,7 +50,7 @@ src/
 ├── config.rs     # typed configuration (stored in DB, cached in Redis)
 ├── utils/        # small, dependency-light helpers
 ├── entities/     # persistence layer
-│   ├── db/       # PostgreSQL rows + compile-time-checked queries
+│   ├── surreal/  # SurrealDB row types + SurrealProcessor queries
 │   └── redis/    # Redis key/value types (rkyv-encoded)
 ├── services/     # business logic (stateful Processors)
 ├── events/       # AMQP payloads + routing
@@ -62,7 +62,7 @@ src/
 
 | You are writing…                                    | Put it in…      |
 | --------------------------------------------------- | --------------- |
-| A SQL query or a table row type                     | `entities/db`   |
+| A SurrealDB query or a table row type               | `entities/surreal`|
 | A Redis-cached value or ephemeral token             | `entities/redis`|
 | A use case that combines queries and rules          | `services`      |
 | A message other modules react to                    | `events`        |
@@ -73,15 +73,22 @@ src/
 
 ## Layer rules
 
-### `entities/db`
+### `entities/surreal`
 
 - One submodule per table or aggregate.
-- Define a `sqlx::FromRow` struct for the row.
-- Implement `Processor<Input>` for `wakuwaku::sqlx::DatabaseProcessor`, one impl
-  per query/command.
-- Use `sqlx::query!` / `query_as!` so queries are checked against the database at
-  compile time. Prefer schema-qualified table names.
-- Annotate impls with `#[tracing::instrument]`.
+- Define a row struct deriving `surrealdb_types::SurrealValue`, and wrap the
+  table's record id in a newtype with `table_record!(NameId, "table")` from
+  `lib/newtype_record_id` (this generates the `RecordId` newtype plus its
+  `SurrealValue` impl).
+- Implement `Processor<Input>` for `wakuwaku::surreal::SurrealProcessor`, one
+  impl per query/command, with `Error = surrealdb::Error`. Run statements with
+  `self.db().query(SQL).bind(("k", v)).await?` then `resp.take::<T>(0)?`; use
+  `.check()?` on write-only commands to surface per-statement errors.
+- Queries are validated at runtime, not compile time, so cover them with the
+  module's integration tests against an in-memory (`mem://`) database.
+- SurrealDB 3.x gotchas: use `type::record(tb, id)` (the old `type::thing` was
+  removed), and never bind a variable named `token` (it is reserved).
+- Annotate every impl with the named tracing span described under *Tracing*.
 
 ### `entities/redis`
 
@@ -131,13 +138,23 @@ src/
 
 ## Cross-cutting conventions
 
-- **Errors:** use `wakuwaku::Error` at the service/hook boundary; `sqlx::Error`
-  is fine inside `entities/db`. Define module-specific error enums with
-  `thiserror` when a layer needs richer variants.
+- **Errors:** use `wakuwaku::Error` at the service/hook boundary. Inside
+  `entities/surreal` return `surrealdb::Error`; it converts into
+  `wakuwaku::Error` via `?` at the service layer (needs `wakuwaku` ≥ 0.2.3).
+  Define module-specific error enums with `thiserror` when a layer needs richer
+  variants.
 - **Lints:** keep the crate-level `#![deny(clippy::unwrap_used)]`,
   `expect_used`, and `panic` lints. No panics on the request path.
-- **Tracing:** instrument entities, services, and RPC handlers with
-  `#[tracing::instrument(skip_all, err)]`.
+- **Tracing:** instrument entities and services with
+  `#[tracing::instrument(skip_all, err)]`, and **always give the span an
+  explicit `name`** — a bare attribute on `Processor::process` produces an
+  indistinguishable `process` span for every impl. Naming convention:
+  - `entities/surreal` queries → `name = "Query:<Input>"` (e.g.
+    `"Query:FindAccountByEmail"`); if the impl drives a SurrealDB transaction,
+    use `name = "Query-Transaction:<Input>"` instead.
+  - `services` operations → `name = "Service:<Input>"` (e.g.
+    `"Service:RegisterAccount"`).
+  - gRPC handlers need no `name`: the trait-method name already labels the span.
 - **Dependency direction:** `rpc → services → entities/events/config`. A feature
   module may depend on `base` (and on shared modules), but `base` must not depend
   on a feature module, and modules must not depend on each other's internals —
@@ -146,15 +163,17 @@ src/
   files there, register them in `rpguru_sdk`'s `build.rs` (Rust side), and
   regenerate the TypeScript side with `bun run generate:proto`. Never hand-edit
   or duplicate generated code.
-- **Migrations:** every schema change is a pair of `.up.sql` / `.down.sql` files
-  in `migrations/`.
+- **Schema:** SurrealDB schema lives in `database/schema/*.surql`, managed with
+  **surrealkit** (`surrealkit sync` in development; `surrealkit rollout` for
+  shared/production databases). Keep each module's tables in its own
+  `<module>.surql` file; the module's integration tests apply that same file.
 
 ## Adding a new module (checklist)
 
 1. Copy the `modules/base` directory layout into `modules/<name>`.
 2. Add the crate to the workspace `members` in the root `Cargo.toml`.
-3. Define tables in `migrations/` and the API in `proto/` (register it in
-   `rpguru_sdk`).
+3. Define the schema in `database/schema/<name>.surql` (surrealkit) and the API
+   in `proto/` (register it in `rpguru_sdk`).
 4. Implement, from the inside out: `entities` → `services` → `rpc`/`hooks`.
 5. Wire the new services/hooks into `bin/guru-master`'s workers.
 6. Keep `config` values seedable from `bin/manage-tool`.
