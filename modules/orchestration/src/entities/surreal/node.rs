@@ -59,7 +59,9 @@ pub struct EntryConfig {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
-pub struct TlsConfig {}
+pub struct TlsConfig {
+    // TODO: implement automatic tls config
+}
 
 #[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
 pub enum ProxyProtocolVersion {
