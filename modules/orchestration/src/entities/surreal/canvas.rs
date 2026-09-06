@@ -6,6 +6,7 @@ table_record!(CanvasId, "orchestration_canvas");
 #[derive(Debug, Clone, SurrealValue)]
 pub struct CanvasEntity {
     pub id: CanvasId,
+    pub parent_canvas: Option<CanvasId>,
     pub name: String,
     pub description: String,
 }
