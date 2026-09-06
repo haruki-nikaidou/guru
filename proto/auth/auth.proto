@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package guru.auth;
+
+// Account roles, mirroring `auth::entities::surreal::account::AccountRole`.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ADMIN = 1;
+  MAINTAINER = 2;
+  OBSERVER = 3;
+}
+
+// How the authenticated caller proved its identity.
+enum IdentityKind {
+  IDENTITY_KIND_UNSPECIFIED = 0;
+  SESSION = 1;
+  API_KEY = 2;
+}
+
+message Account {
+  string id = 1;
+  string email = 2;
+  Role role = 3;
+}
+
+message ApiKeySummary {
+  string id = 1;
+  string name = 2;
+  string owner_account_id = 3;
+  string created_at = 4;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+  string user_agent = 3;
+}
+enum LoginResult {
+  LOGIN_RESULT_UNSPECIFIED = 0;
+  SUCCESS = 1;
+  INVALID_CREDENTIALS = 2;
+}
+message LoginReply {
+  LoginResult result = 1;
+  string session_id = 2;
+}
+
+message LogoutRequest {}
+message LogoutReply {}
+
+message CurrentIdentityRequest {}
+message CurrentIdentityReply {
+  string account_id = 1;
+  string email = 2;
+  Role role = 3;
+  IdentityKind kind = 4;
+}
+
+enum ChangePasswordResult {
+  CHANGE_PASSWORD_RESULT_UNSPECIFIED = 0;
+  CHANGED = 1;
+  WRONG_PASSWORD = 2;
+}
+message ChangePasswordRequest {
+  string current_password = 1;
+  string new_password = 2;
+}
+message ChangePasswordReply {
+  ChangePasswordResult result = 1;
+}
+
+enum ChangeEmailResult {
+  CHANGE_EMAIL_RESULT_UNSPECIFIED = 0;
+  CHANGE_EMAIL_CHANGED = 1;
+  CHANGE_EMAIL_WRONG_PASSWORD = 2;
+  EMAIL_TAKEN = 3;
+}
+message ChangeEmailRequest {
+  string new_email = 1;
+  string current_password = 2;
+}
+message ChangeEmailReply {
+  ChangeEmailResult result = 1;
+}
+
+enum CreateAccountResult {
+  CREATE_ACCOUNT_RESULT_UNSPECIFIED = 0;
+  CREATED = 1;
+  CREATE_ACCOUNT_EMAIL_TAKEN = 2;
+}
+message CreateAccountRequest {
+  string email = 1;
+  string password = 2;
+  Role role = 3;
+}
+message CreateAccountReply {
+  CreateAccountResult result = 1;
+  Account account = 2;
+}
+
+message ListAccountsRequest {}
+message ListAccountsReply {
+  repeated Account accounts = 1;
+}
+message UpdateAccountRoleRequest {
+  string account_id = 1;
+  Role role = 2;
+}
+message UpdateAccountRoleReply {
+  Account account = 1;
+}
+message DeleteAccountRequest {
+  string account_id = 1;
+}
+message DeleteAccountReply {}
+
+message CreateApiKeyRequest {
+  string name = 1;
+}
+message CreateApiKeyReply {
+  string id = 1;
+  string secret = 2;
+}
+message ListApiKeysRequest {}
+message ListApiKeysReply {
+  repeated ApiKeySummary keys = 1;
+}
+message RevokeApiKeyRequest {
+  string id = 1;
+}
+message RevokeApiKeyReply {}
+
+service Auth {
+  rpc Login(LoginRequest) returns (LoginReply);
+  rpc Logout(LogoutRequest) returns (LogoutReply);
+  rpc CurrentIdentity(CurrentIdentityRequest) returns (CurrentIdentityReply);
+  rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordReply);
+  rpc ChangeEmail(ChangeEmailRequest) returns (ChangeEmailReply);
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountReply);
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsReply);
+  rpc UpdateAccountRole(UpdateAccountRoleRequest) returns (UpdateAccountRoleReply);
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountReply);
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyReply);
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysReply);
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyReply);
+}

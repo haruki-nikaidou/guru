@@ -32,3 +32,18 @@
 //!     }
 //! }
 //! ```
+
+pub mod account;
+pub mod api_key;
+pub mod identity;
+pub mod session;
+
+pub use account::{
+    AccountService, ChangeEmailResult, ChangeOwnEmail, ChangeOwnPassword, ChangePasswordResult,
+    DeleteAccount, ListAccounts, RegisterAccount, RegisterResult, SetAccountRole,
+};
+pub use api_key::{
+    ApiKeyService, AuthenticateApiKey, CreateApiKey, CreatedApiKey, ListApiKeys, RevokeApiKey,
+};
+pub use identity::{Identity, IdentityKind};
+pub use session::{AuthenticateSession, Login, LoginResult, Logout, SessionService};

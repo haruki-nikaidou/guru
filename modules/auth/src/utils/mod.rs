@@ -5,4 +5,6 @@
 //! dependencies (database, Redis, message queue) belongs in
 //! [`services`](crate::services) instead.
 
+pub mod password;
 pub mod rbac;
+pub mod token;

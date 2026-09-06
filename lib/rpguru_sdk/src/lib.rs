@@ -29,3 +29,9 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
+
+/// Generated types and service traits for `proto/auth/auth.proto`
+/// (`package guru.auth`).
+pub mod auth {
+    tonic::include_proto!("guru.auth");
+}

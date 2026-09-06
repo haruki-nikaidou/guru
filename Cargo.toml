@@ -22,7 +22,7 @@ license = "MIT"
 tokio = { version = "1.49", features = ["full"] }
 
 # Framework
-wakuwaku = { version = "0.2", features = ["tracing-otel", "tonic", "surreal"] }
+wakuwaku = { version = "0.2.3", features = ["tracing-otel", "tonic", "surreal"] }
 kanau = { version = "0.5", features = [
     "message",
     "rkyv",
@@ -78,6 +78,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 
 # Auth & Security
 rand = "0.9.1"
+argon2 = "0.5"
 validator = "0.20.0"
 jsonwebtoken = "9.2.0"
 sha2 = "0.10"
@@ -92,6 +93,10 @@ opentelemetry-appender-tracing = "0.31"
 
 # Tracing
 tracing = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
 
 # Algorithm
 itertools = "0.14"

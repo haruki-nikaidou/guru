@@ -40,3 +40,8 @@
 //! ```
 
 pub mod middleware;
+mod auth_service;
+
+pub use auth_service::AuthGrpc;
+pub use middleware::{AuthLayer, AuthMiddleware, API_KEY_METADATA, SESSION_ID_METADATA};
+pub use crate::services::{Identity, IdentityKind};
