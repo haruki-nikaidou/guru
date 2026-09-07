@@ -60,10 +60,11 @@ pub struct EntryConfig {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
+/// By setting this, the master node will acquire a TLS certificate and send it to worker nodes.
 pub struct TlsConfig {
     /// The SNI of the TLS certificate
     pub sni: String,
-    
+
     /// Which DNS provider to use for the TLS certificate
     pub dns_provider: DnsProvider,
 
@@ -71,6 +72,11 @@ pub struct TlsConfig {
     /// - Cloudflare: zone ID
     /// - vercel: domain SLD
     pub domain_id: String,
+
+    /// The URL of the ACME directory.
+    ///
+    /// eg. <https://acme-staging-v02.api.letsencrypt.org/directory>
+    pub acme_directory: String,
 }
 
 #[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
