@@ -1,4 +1,5 @@
 use crate::entities::surreal::canvas::{CanvasId, CanvasUiPosition};
+use crate::entities::surreal::dns::DnsProvider;
 use crate::entities::surreal::port::{PortEntity, PortKind};
 use crate::entities::surreal::server::ServerId;
 use newtype_record_id::table_record;
@@ -60,7 +61,16 @@ pub struct EntryConfig {
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct TlsConfig {
-    // TODO: implement automatic tls config
+    /// The SNI of the TLS certificate
+    pub sni: String,
+    
+    /// Which DNS provider to use for the TLS certificate
+    pub dns_provider: DnsProvider,
+
+    /// The identifier of the domain
+    /// - Cloudflare: zone ID
+    /// - vercel: domain SLD
+    pub domain_id: String,
 }
 
 #[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
@@ -111,5 +121,5 @@ pub enum LoadBalanceMode {
 
 pub struct NodeWithPorts {
     pub node: NodeEntity,
-    pub port_records: Vec<PortEntity>
+    pub port_records: Vec<PortEntity>,
 }
