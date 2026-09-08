@@ -9,8 +9,8 @@ use crate::entities::surreal::server::{
     FindServerById, FindServerByRefreshKeyDigest, MarkServerApplied, RotateServerRefreshKey,
     ServerId, SetServerApplyError,
 };
-use crate::services::watch::WatchHub;
 use crate::services::OrchestrationError;
+use crate::services::watch::WatchHub;
 use crate::utils::ids::record_key;
 use auth::services::identity::Identity;
 use auth::utils::rbac::Permission;

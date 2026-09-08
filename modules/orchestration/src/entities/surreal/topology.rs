@@ -118,26 +118,12 @@ async fn load_canvas(
     canvas: &CanvasId,
     live_only: bool,
 ) -> Result<CanvasRows, surrealdb::Error> {
-    let node_filter = if live_only {
-        "SELECT * FROM orchestration_node WHERE canvas = $canvas AND retired_rev IS NONE"
+    let sql = if live_only {
+        include_str!("../../../sql/topology/load_canvas_live.surql")
     } else {
-        "SELECT * FROM orchestration_node WHERE canvas = $canvas"
+        include_str!("../../../sql/topology/load_canvas_all.surql")
     };
-    let edge_filter = if live_only {
-        "SELECT * FROM orchestration_edge_connection
-         WHERE in.owner.canvas = $canvas AND retired_rev IS NONE"
-    } else {
-        "SELECT * FROM orchestration_edge_connection WHERE in.owner.canvas = $canvas"
-    };
-    let mut resp = sp
-        .db()
-        .query("SELECT * FROM orchestration_server WHERE canvas = $canvas")
-        .query("SELECT * FROM server_ip_record WHERE server.canvas = $canvas")
-        .query(node_filter)
-        .query("SELECT * FROM orchestration_port WHERE owner.canvas = $canvas ORDER BY position")
-        .query(edge_filter)
-        .bind(("canvas", canvas.clone()))
-        .await?;
+    let mut resp = sp.db().query(sql).bind(("canvas", canvas.clone())).await?;
     let servers = resp.take::<Vec<ServerEntity>>(0)?;
     let ips = resp.take::<Vec<ServerIpRecordEntity>>(1)?;
     let node_rows = resp.take::<Vec<NodeEntity>>(2)?;

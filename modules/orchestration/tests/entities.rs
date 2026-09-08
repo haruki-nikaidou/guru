@@ -24,8 +24,8 @@ use orchestration::entities::surreal::revision::{
 use orchestration::entities::surreal::server::{
     DeleteServerIpRow, DeleteServerRow, FindServerById, FindServerByRefreshKeyDigest,
     FindServerIpById, ListServerIpsByCanvas, ListServerWatchState, ListServersByCanvas,
-    MarkServerApplied, MoveServerPosition, RotateServerRefreshKey, SetServerApplyError,
-    SetServerDesiredRevision, ServerIpv6Resolve, UpdateServerSettings,
+    MarkServerApplied, MoveServerPosition, RotateServerRefreshKey, ServerIpv6Resolve,
+    SetServerApplyError, SetServerDesiredRevision, UpdateServerSettings,
 };
 use orchestration::entities::surreal::topology::{
     FindCanvasOfServer, LoadCanvasContents, LoadCanvasTopology,
@@ -291,15 +291,7 @@ async fn retire_node_retires_its_live_edges() -> TestResult {
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
     let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(
-        &sp,
-        &c,
-        "exit",
-        exit_spec("10.0.0.5:8080"),
-        exit_ports(),
-        1,
-    )
-    .await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
@@ -339,10 +331,12 @@ async fn retire_node_retires_its_live_edges() -> TestResult {
         Some(7)
     );
     assert_eq!(
-        sp.process(FindEdgeById { id: edge.id.clone() })
-            .await?
-            .unwrap()
-            .retired_rev,
+        sp.process(FindEdgeById {
+            id: edge.id.clone()
+        })
+        .await?
+        .unwrap()
+        .retired_rev,
         Some(7),
         "retiring a node retires every live edge touching its ports"
     );
@@ -372,15 +366,7 @@ async fn force_delete_node_leaves_no_ports_or_edges() -> TestResult {
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
     let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(
-        &sp,
-        &c,
-        "exit",
-        exit_spec("10.0.0.5:8080"),
-        exit_ports(),
-        1,
-    )
-    .await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
@@ -393,7 +379,11 @@ async fn force_delete_node_leaves_no_ports_or_edges() -> TestResult {
         id: pod.node.id.clone(),
     })
     .await?;
-    assert!(sp.process(FindNodeById { id: pod.node.id }).await?.is_none());
+    assert!(
+        sp.process(FindNodeById { id: pod.node.id })
+            .await?
+            .is_none()
+    );
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
     let topology = sp
         .process(LoadCanvasTopology {
@@ -417,15 +407,7 @@ async fn replace_node_carries_edges_to_the_replacement() -> TestResult {
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
     let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(
-        &sp,
-        &c,
-        "exit",
-        exit_spec("10.0.0.5:8080"),
-        exit_ports(),
-        1,
-    )
-    .await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
@@ -467,7 +449,10 @@ async fn replace_node_carries_edges_to_the_replacement() -> TestResult {
         Some(5)
     );
     assert_eq!(
-        sp.process(FindEdgeById { id: edge.id }).await?.unwrap().retired_rev,
+        sp.process(FindEdgeById { id: edge.id })
+            .await?
+            .unwrap()
+            .retired_rev,
         Some(5)
     );
 
@@ -493,15 +478,7 @@ async fn edges_can_be_retired_and_force_deleted() -> TestResult {
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
     let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(
-        &sp,
-        &c,
-        "exit",
-        exit_spec("10.0.0.5:8080"),
-        exit_ports(),
-        1,
-    )
-    .await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
@@ -516,10 +493,12 @@ async fn edges_can_be_retired_and_force_deleted() -> TestResult {
     })
     .await?;
     assert_eq!(
-        sp.process(FindEdgeById { id: edge.id.clone() })
-            .await?
-            .unwrap()
-            .retired_rev,
+        sp.process(FindEdgeById {
+            id: edge.id.clone()
+        })
+        .await?
+        .unwrap()
+        .retired_rev,
         Some(3)
     );
     assert!(
@@ -530,8 +509,10 @@ async fn edges_can_be_retired_and_force_deleted() -> TestResult {
         .is_none()
     );
 
-    sp.process(ForceDeleteEdgeRow { id: edge.id.clone() })
-        .await?;
+    sp.process(ForceDeleteEdgeRow {
+        id: edge.id.clone(),
+    })
+    .await?;
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
     Ok(())
 }
@@ -604,15 +585,7 @@ async fn gc_keeps_retired_rows_a_retained_revision_still_references() -> TestRes
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
     let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(
-        &sp,
-        &c,
-        "exit",
-        exit_spec("10.0.0.5:8080"),
-        exit_ports(),
-        1,
-    )
-    .await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
@@ -657,7 +630,11 @@ async fn gc_keeps_retired_rows_a_retained_revision_still_references() -> TestRes
     .await?;
     let report = sp.process(CollectRcuGarbage {}).await?;
     assert_eq!((report.nodes, report.edges), (1, 1));
-    assert!(sp.process(FindNodeById { id: pod.node.id }).await?.is_none());
+    assert!(
+        sp.process(FindNodeById { id: pod.node.id })
+            .await?
+            .is_none()
+    );
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
     assert!(
         sp.process(FindNodeById {

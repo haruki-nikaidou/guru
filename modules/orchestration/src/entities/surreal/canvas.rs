@@ -127,15 +127,7 @@ impl Processor<DeleteCanvasRow> for SurrealProcessor {
     #[tracing::instrument(name = "Query-Transaction:DeleteCanvasRow", skip_all, err, fields(canvas_id = ?input.id))]
     async fn process(&self, input: DeleteCanvasRow) -> Result<Self::Output, Self::Error> {
         self.db()
-            .query(
-                "BEGIN TRANSACTION;
-                 LET $servers = (SELECT VALUE id FROM orchestration_server WHERE canvas = $id);
-                 DELETE orchestration_server_config_revision WHERE server IN $servers;
-                 DELETE server_ip_record WHERE server IN $servers;
-                 DELETE orchestration_server WHERE id IN $servers;
-                 DELETE $id;
-                 COMMIT TRANSACTION;",
-            )
+            .query(include_str!("../../../sql/canvas/delete_canvas_row.surql"))
             .bind(("id", input.id))
             .await?
             .check()?;

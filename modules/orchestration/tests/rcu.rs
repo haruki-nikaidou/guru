@@ -4,25 +4,23 @@
 
 mod common;
 
+use auth::entities::surreal::account::{AccountId, AccountRole};
+use auth::services::identity::{Identity, IdentityKind};
 use common::*;
 use kanau::processor::Processor;
 use orchestration::entities::surreal::canvas::CanvasUiPosition;
+use orchestration::entities::surreal::connection::FindEdgeById;
 use orchestration::entities::surreal::node::{
     EntryConfig, ExitConfig, FindNodeById, NodeSpec, PodConfig,
 };
 use orchestration::entities::surreal::revision::{CollectRcuGarbage, ListRetainedRevisions};
 use orchestration::entities::surreal::server::{FindServerById, ServerIpv6Resolve};
-use orchestration::entities::surreal::connection::FindEdgeById;
 use orchestration::services::agent::{AckConfig, AgentIdentity, AgentService, RegisterWorker};
 use orchestration::services::canvas::CanvasService;
 use orchestration::services::edge::{Connect, Disconnect, EdgeService, ForceDisconnect};
-use orchestration::services::node::{
-    CreateNode, ForceDeleteNode, NodeService, ReplaceNodeSpec,
-};
+use orchestration::services::node::{CreateNode, ForceDeleteNode, NodeService, ReplaceNodeSpec};
 use orchestration::services::server::{AddServerIp, CreateServer, ServerService};
 use orchestration::services::{OrchestrationError, canvas as canvas_service};
-use auth::entities::surreal::account::{AccountId, AccountRole};
-use auth::services::identity::{Identity, IdentityKind};
 use surrealdb::types::RecordId;
 use wakuwaku::surreal::SurrealProcessor;
 
@@ -82,13 +80,10 @@ async fn ack_current(
             running_revision: 0,
         })
         .await?;
-    let row = w
-        .db
-        .process(FindServerById {
-            id: server.clone(),
-        })
-        .await?
-        .unwrap();
+    let row =
+        w.db.process(FindServerById { id: server.clone() })
+            .await?
+            .unwrap();
     w.agents
         .process(AckConfig {
             agent: AgentIdentity {
@@ -204,16 +199,14 @@ async fn replacing_a_pod_keeps_the_old_row_until_the_server_acks() -> TestResult
         })
         .await?;
 
-    let a_before = w
-        .db
-        .process(FindServerById {
+    let a_before =
+        w.db.process(FindServerById {
             id: server_a.clone(),
         })
         .await?
         .unwrap();
-    let b_before = w
-        .db
-        .process(FindServerById {
+    let b_before =
+        w.db.process(FindServerById {
             id: server_b.clone(),
         })
         .await?
@@ -261,11 +254,16 @@ async fn replacing_a_pod_keeps_the_old_row_until_the_server_acks() -> TestResult
         .await?
         .is_some()
     );
-    assert!(w.db.process(FindEdgeById { id: edge.id.clone() }).await?.is_some());
+    assert!(
+        w.db.process(FindEdgeById {
+            id: edge.id.clone()
+        })
+        .await?
+        .is_some()
+    );
 
-    let b_after = w
-        .db
-        .process(FindServerById {
+    let b_after =
+        w.db.process(FindServerById {
             id: server_b.clone(),
         })
         .await?
@@ -274,9 +272,8 @@ async fn replacing_a_pod_keeps_the_old_row_until_the_server_acks() -> TestResult
         b_after.desired_revision, b_before.desired_revision,
         "an unrelated server is not re-stamped and never blocks collection"
     );
-    let b_retained = w
-        .db
-        .process(ListRetainedRevisions {
+    let b_retained =
+        w.db.process(ListRetainedRevisions {
             server: server_b.clone(),
         })
         .await?;
@@ -295,7 +292,11 @@ async fn replacing_a_pod_keeps_the_old_row_until_the_server_acks() -> TestResult
         (1, 2),
         "the replaced pod and both of its edges are freed"
     );
-    assert!(w.db.process(FindNodeById { id: pod.node.id }).await?.is_none());
+    assert!(
+        w.db.process(FindNodeById { id: pod.node.id })
+            .await?
+            .is_none()
+    );
     assert!(w.db.process(FindEdgeById { id: edge.id }).await?.is_none());
     assert!(
         w.db.process(FindNodeById {
@@ -411,7 +412,13 @@ async fn force_delete_frees_a_row_that_is_still_referenced() -> TestResult {
         .await?;
     let report = w.db.process(CollectRcuGarbage {}).await?;
     assert_eq!(report.edges, 0);
-    assert!(w.db.process(FindEdgeById { id: edge.id.clone() }).await?.is_some());
+    assert!(
+        w.db.process(FindEdgeById {
+            id: edge.id.clone()
+        })
+        .await?
+        .is_some()
+    );
 
     // Force deleting removes it immediately, retained reference or not.
     w.edges
@@ -428,7 +435,11 @@ async fn force_delete_frees_a_row_that_is_still_referenced() -> TestResult {
             node: exit.node.id.clone(),
         })
         .await?;
-    assert!(w.db.process(FindNodeById { id: exit.node.id }).await?.is_none());
+    assert!(
+        w.db.process(FindNodeById { id: exit.node.id })
+            .await?
+            .is_none()
+    );
     Ok(())
 }
 
