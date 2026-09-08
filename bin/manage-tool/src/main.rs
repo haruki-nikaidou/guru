@@ -110,9 +110,7 @@ async fn export_config(
     };
     let topology = db
         .process(
-            orchestration::entities::surreal::topology::LoadCanvasTopology {
-                canvas: row.canvas,
-            },
+            orchestration::entities::surreal::topology::LoadCanvasTopology { canvas: row.canvas },
         )
         .await?;
     let derived = orchestration::services::derive::derive_server_config(&topology, &server_id)?;

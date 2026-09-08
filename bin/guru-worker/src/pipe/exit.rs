@@ -1,6 +1,6 @@
 use crate::BoxError;
-use guru_worker_config::{Ipv6Resolve, Remote, TcpProxyProtocol};
 use crate::pipe::write_proxy_header;
+use guru_worker_config::{Ipv6Resolve, Remote, TcpProxyProtocol};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 

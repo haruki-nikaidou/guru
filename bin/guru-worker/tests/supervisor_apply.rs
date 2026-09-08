@@ -3,10 +3,10 @@
 //! `Supervisor::apply` is all-or-nothing: a config that cannot be fully bound must
 //! leave the previously running listeners serving.
 
+use guru_worker::supervisor::Supervisor;
 use guru_worker_config::{
     Config, Forwarding, ForwardingTo, Ipv6Resolve, ListenAs, LogConfig, Remote,
 };
-use guru_worker::supervisor::Supervisor;
 use std::net::SocketAddr;
 
 fn free_port() -> u16 {

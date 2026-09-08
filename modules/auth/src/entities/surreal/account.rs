@@ -63,10 +63,9 @@ impl Processor<CreateAccount> for SurrealProcessor {
             .bind(("password_hash", input.password_hash))
             .bind(("role", input.role))
             .await?;
-        resp.take::<Option<AccountEntity>>(0)?
-            .ok_or_else(|| {
-                surrealdb::Error::internal("create auth_account returned no row".to_string())
-            })
+        resp.take::<Option<AccountEntity>>(0)?.ok_or_else(|| {
+            surrealdb::Error::internal("create auth_account returned no row".to_string())
+        })
     }
 }
 

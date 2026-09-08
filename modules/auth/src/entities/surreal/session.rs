@@ -59,8 +59,9 @@ impl Processor<CreateSession> for SurrealProcessor {
             .bind(("created_at", input.created_at))
             .bind(("last_active_at", input.last_active_at))
             .await?;
-        resp.take::<Option<SessionEntity>>(0)?
-            .ok_or_else(|| surrealdb::Error::internal("create auth_session returned no row".to_string()))
+        resp.take::<Option<SessionEntity>>(0)?.ok_or_else(|| {
+            surrealdb::Error::internal("create auth_session returned no row".to_string())
+        })
     }
 }
 

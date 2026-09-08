@@ -13,9 +13,7 @@ use auth::services::account::{
 };
 use auth::services::api_key::{ApiKeyService, AuthenticateApiKey, CreateApiKey};
 use auth::services::identity::{Identity, IdentityKind};
-use auth::services::session::{
-    AuthenticateSession, Login, LoginResult, Logout, SessionService,
-};
+use auth::services::session::{AuthenticateSession, Login, LoginResult, Logout, SessionService};
 use auth::utils::password::{Argon2PasswordAlgorithm, PasswordAlgorithm};
 use auth::utils::rbac::Permission;
 use kanau::processor::Processor;
@@ -59,7 +57,10 @@ async fn setup() -> Result<
     Ok((sp, accounts, sessions, api_keys))
 }
 
-fn session_identity(account_id: auth::entities::surreal::account::AccountId, role: AccountRole) -> Identity {
+fn session_identity(
+    account_id: auth::entities::surreal::account::AccountId,
+    role: AccountRole,
+) -> Identity {
     Identity {
         account_id,
         role,

@@ -5,7 +5,12 @@ use std::path::PathBuf;
 #[command(name = "guru-worker", about = "guru data-plane worker")]
 pub struct Cli {
     /// Standalone mode: path of the TOML config to load and reload on SIGHUP.
-    #[arg(short = 'c', long, env = "GURU_WORKER_CONFIG", conflicts_with = "master")]
+    #[arg(
+        short = 'c',
+        long,
+        env = "GURU_WORKER_CONFIG",
+        conflicts_with = "master"
+    )]
     pub config: Option<PathBuf>,
     /// Agent mode: `guru-master` worker endpoint, e.g. `http://10.0.0.1:50052`.
     #[arg(long, env = "GURU_MASTER", requires_all = ["api_key", "server"])]

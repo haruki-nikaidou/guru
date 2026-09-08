@@ -1,6 +1,6 @@
 use crate::BoxError;
-use guru_worker_config::{Ipv6Resolve, RelayProtocol, Remote, TcpProxyProtocol};
 use crate::pipe::write_proxy_header;
+use guru_worker_config::{Ipv6Resolve, RelayProtocol, Remote, TcpProxyProtocol};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};

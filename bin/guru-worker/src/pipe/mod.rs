@@ -4,9 +4,9 @@ pub mod load_balance;
 pub mod relay;
 
 use crate::BoxError;
-use guru_worker_config::TcpProxyProtocol;
 use crate::pipe::relay::RelayStream;
 use crate::prepared::{PreparedForwarding, Target};
+use guru_worker_config::TcpProxyProtocol;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;

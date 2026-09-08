@@ -6,19 +6,16 @@ use tonic::{Request, Response, Status};
 
 use rpguru_sdk::auth as pb;
 
-use crate::entities::surreal::account::{
-    AccountEntity, AccountId, AccountRole, FindAccountById,
-};
+use crate::entities::surreal::account::{AccountEntity, AccountId, AccountRole, FindAccountById};
 use crate::entities::surreal::api_key::{ApiKeyId, ApiKeyOmitSecret};
 use crate::rpc::middleware::{SESSION_ID_METADATA, from_request};
+use crate::services::api_key::ListApiKeys;
 use crate::services::identity::IdentityKind;
 use crate::services::{
-    AccountService, ApiKeyService, ChangeEmailResult, ChangeOwnEmail,
-    ChangeOwnPassword, ChangePasswordResult, CreateApiKey, DeleteAccount, ListAccounts, Login,
-    LoginResult, Logout, RegisterAccount, RegisterResult, RevokeApiKey, SessionService,
-    SetAccountRole,
+    AccountService, ApiKeyService, ChangeEmailResult, ChangeOwnEmail, ChangeOwnPassword,
+    ChangePasswordResult, CreateApiKey, DeleteAccount, ListAccounts, Login, LoginResult, Logout,
+    RegisterAccount, RegisterResult, RevokeApiKey, SessionService, SetAccountRole,
 };
-use crate::services::api_key::ListApiKeys;
 
 const ACCOUNT_TABLE: &str = "auth_account";
 const API_KEY_TABLE: &str = "api_key";
@@ -274,7 +271,9 @@ impl pb::auth_server::Auth for AuthGrpc {
         let actor = from_request(&request)?;
         let req = request.into_inner();
         let target = account_id_from_key(&req.account_id);
-        self.accounts.process(DeleteAccount { actor, target }).await?;
+        self.accounts
+            .process(DeleteAccount { actor, target })
+            .await?;
         Ok(Response::new(pb::DeleteAccountReply {}))
     }
 

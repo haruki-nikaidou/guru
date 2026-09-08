@@ -261,15 +261,7 @@ impl Forwarding {
 /// destination, captured into each compiled target. `Tolerated` is the default (prefer
 /// IPv4, fall back to IPv6).
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Ipv6Resolve {

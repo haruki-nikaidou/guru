@@ -1,6 +1,6 @@
 use crate::BoxError;
-use guru_worker_config::{Ipv6Resolve, Remote};
 use compact_str::CompactString;
+use guru_worker_config::{Ipv6Resolve, Remote};
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;

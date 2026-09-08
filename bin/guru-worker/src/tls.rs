@@ -1,5 +1,5 @@
-use guru_worker_config::TlsHostConfig;
 use crate::pipe::AsyncRw;
+use guru_worker_config::TlsHostConfig;
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslFiletype, SslMethod};
 
 /// Builds a TLS server acceptor from a cert chain + key on disk (parsed once).

@@ -1,7 +1,7 @@
 use crate::BoxError;
-use guru_worker_config::TcpProxyProtocol;
 use crate::pipe::{Prefixed, read_proxy_header};
 use crate::prepared::Ingest;
+use guru_worker_config::TcpProxyProtocol;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
