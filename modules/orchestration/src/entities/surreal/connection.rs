@@ -18,6 +18,7 @@ pub struct EdgeConnectionEntity {
     pub retired_rev: Option<i64>,
 }
 
+#[derive(Debug)]
 pub struct ConnectPorts {
     pub source: PortId,
     pub target: PortId,
@@ -27,7 +28,7 @@ pub struct ConnectPorts {
 impl Processor<ConnectPorts> for SurrealProcessor {
     type Output = EdgeConnectionEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ConnectPorts", skip_all, err)]
+    #[tracing::instrument(name = "Query:ConnectPorts", skip(self), err)]
     async fn process(&self, input: ConnectPorts) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -44,6 +45,7 @@ impl Processor<ConnectPorts> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct FindEdgeById {
     pub id: EdgeConnectionId,
 }
@@ -51,7 +53,7 @@ pub struct FindEdgeById {
 impl Processor<FindEdgeById> for SurrealProcessor {
     type Output = Option<EdgeConnectionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindEdgeById", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindEdgeById", skip(self), err)]
     async fn process(&self, input: FindEdgeById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -62,6 +64,7 @@ impl Processor<FindEdgeById> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct ListLiveEdgesByCanvas {
     pub canvas: CanvasId,
 }
@@ -69,7 +72,12 @@ pub struct ListLiveEdgesByCanvas {
 impl Processor<ListLiveEdgesByCanvas> for SurrealProcessor {
     type Output = Vec<EdgeConnectionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListLiveEdgesByCanvas", skip_all, err)]
+    #[tracing::instrument(
+        name = "Query:ListLiveEdgesByCanvas",
+        skip(self),
+        err,
+        fields(result_count)
+    )]
     async fn process(&self, input: ListLiveEdgesByCanvas) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -79,10 +87,13 @@ impl Processor<ListLiveEdgesByCanvas> for SurrealProcessor {
             )
             .bind(("canvas", input.canvas))
             .await?;
-        resp.take::<Vec<EdgeConnectionEntity>>(0)
+        let result = resp.take::<Vec<EdgeConnectionEntity>>(0)?;
+        tracing::Span::current().record("result_count", result.len());
+        Ok(result)
     }
 }
 
+#[derive(Debug)]
 /// Live **and** retiring edges, for the dashboard view of a rollout in flight.
 pub struct ListEdgesByCanvas {
     pub canvas: CanvasId,
@@ -91,17 +102,25 @@ pub struct ListEdgesByCanvas {
 impl Processor<ListEdgesByCanvas> for SurrealProcessor {
     type Output = Vec<EdgeConnectionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListEdgesByCanvas", skip_all, err)]
+    #[tracing::instrument(
+        name = "Query:ListEdgesByCanvas",
+        skip(self),
+        err,
+        fields(result_count)
+    )]
     async fn process(&self, input: ListEdgesByCanvas) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
             .query("SELECT * FROM orchestration_edge_connection WHERE in.owner.canvas = $canvas")
             .bind(("canvas", input.canvas))
             .await?;
-        resp.take::<Vec<EdgeConnectionEntity>>(0)
+        let result = resp.take::<Vec<EdgeConnectionEntity>>(0)?;
+        tracing::Span::current().record("result_count", result.len());
+        Ok(result)
     }
 }
 
+#[derive(Debug)]
 pub struct FindLiveEdgeByPort {
     pub port: PortId,
 }
@@ -109,7 +128,7 @@ pub struct FindLiveEdgeByPort {
 impl Processor<FindLiveEdgeByPort> for SurrealProcessor {
     type Output = Option<EdgeConnectionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindLiveEdgeByPort", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindLiveEdgeByPort", skip(self), err)]
     async fn process(&self, input: FindLiveEdgeByPort) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -123,6 +142,7 @@ impl Processor<FindLiveEdgeByPort> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct RetireEdgeRow {
     pub id: EdgeConnectionId,
     pub revision: i64,
@@ -131,7 +151,7 @@ pub struct RetireEdgeRow {
 impl Processor<RetireEdgeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:RetireEdgeRow", skip_all, err)]
+    #[tracing::instrument(name = "Query:RetireEdgeRow", skip(self), err)]
     async fn process(&self, input: RetireEdgeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(
@@ -146,6 +166,7 @@ impl Processor<RetireEdgeRow> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct ForceDeleteEdgeRow {
     pub id: EdgeConnectionId,
 }
@@ -153,7 +174,7 @@ pub struct ForceDeleteEdgeRow {
 impl Processor<ForceDeleteEdgeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ForceDeleteEdgeRow", skip_all, err)]
+    #[tracing::instrument(name = "Query:ForceDeleteEdgeRow", skip(self), err)]
     async fn process(&self, input: ForceDeleteEdgeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE orchestration_edge_connection WHERE id = $id")

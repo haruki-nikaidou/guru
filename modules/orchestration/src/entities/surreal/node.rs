@@ -189,7 +189,15 @@ pub struct CreateNodeRow {
 impl Processor<CreateNodeRow> for SurrealProcessor {
     type Output = NodeWithPorts;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:CreateNodeRow", skip_all, err)]
+    #[tracing::instrument(
+        name = "Query-Transaction:CreateNodeRow",
+        skip_all,
+        err,
+        fields(
+            canvas = ?input.canvas,
+            name = ?input.name,
+        )
+    )]
     async fn process(&self, input: CreateNodeRow) -> Result<Self::Output, Self::Error> {
         // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
@@ -221,6 +229,7 @@ impl Processor<CreateNodeRow> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct FindNodeById {
     pub id: NodeId,
 }
@@ -228,7 +237,7 @@ pub struct FindNodeById {
 impl Processor<FindNodeById> for SurrealProcessor {
     type Output = Option<NodeEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindNodeById", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindNodeById", skip(self), err)]
     async fn process(&self, input: FindNodeById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -239,6 +248,7 @@ impl Processor<FindNodeById> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct FindNodeWithPorts {
     pub id: NodeId,
 }
@@ -246,7 +256,7 @@ pub struct FindNodeWithPorts {
 impl Processor<FindNodeWithPorts> for SurrealProcessor {
     type Output = Option<NodeWithPorts>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindNodeWithPorts", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindNodeWithPorts", skip(self), err)]
     async fn process(&self, input: FindNodeWithPorts) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -273,7 +283,7 @@ pub struct UpdateNodeMetaRow {
 impl Processor<UpdateNodeMetaRow> for SurrealProcessor {
     type Output = NodeEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:UpdateNodeMetaRow", skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateNodeMetaRow", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: UpdateNodeMetaRow) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -288,6 +298,7 @@ impl Processor<UpdateNodeMetaRow> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct RetireNodeRow {
     pub id: NodeId,
     pub revision: i64,
@@ -296,7 +307,7 @@ pub struct RetireNodeRow {
 impl Processor<RetireNodeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:RetireNodeRow", skip_all, err)]
+    #[tracing::instrument(name = "Query-Transaction:RetireNodeRow", skip(self), err)]
     async fn process(&self, input: RetireNodeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(
@@ -316,6 +327,7 @@ impl Processor<RetireNodeRow> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct ForceDeleteNodeRow {
     pub id: NodeId,
 }
@@ -323,7 +335,7 @@ pub struct ForceDeleteNodeRow {
 impl Processor<ForceDeleteNodeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:ForceDeleteNodeRow", skip_all, err)]
+    #[tracing::instrument(name = "Query-Transaction:ForceDeleteNodeRow", skip(self), err)]
     async fn process(&self, input: ForceDeleteNodeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(
@@ -356,7 +368,7 @@ pub struct ReplaceNodeRow {
 impl Processor<ReplaceNodeRow> for SurrealProcessor {
     type Output = NodeWithPorts;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:ReplaceNodeRow", skip_all, err)]
+    #[tracing::instrument(name = "Query-Transaction:ReplaceNodeRow", skip_all, err, fields(old = ?input.old, canvas = ?input.canvas))]
     async fn process(&self, input: ReplaceNodeRow) -> Result<Self::Output, Self::Error> {
         // Statement 0 is BEGIN; the RETURN below is statement 7.
         let mut resp = self

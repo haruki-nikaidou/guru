@@ -34,7 +34,7 @@ pub struct ServerConfigRevisionEntity {
 /// `sequence::nextval` yields `0` on its first call, while `0` is the reserved
 /// sentinel for "never stamped" (a fresh server) and "no last-known-good file"
 /// (a fresh worker), so every real revision starts at `1`.
-pub struct NextRevision {}
+pub struct NextRevision;
 
 impl Processor<NextRevision> for SurrealProcessor {
     type Output = i64;
@@ -61,7 +61,7 @@ pub struct RecordServerConfigRevision {
 impl Processor<RecordServerConfigRevision> for SurrealProcessor {
     type Output = ServerConfigRevisionEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:RecordServerConfigRevision", skip_all, err)]
+    #[tracing::instrument(name = "Query:RecordServerConfigRevision", skip_all, err, fields(server = ?input.server))]
     async fn process(
         &self,
         input: RecordServerConfigRevision,
@@ -80,12 +80,14 @@ impl Processor<RecordServerConfigRevision> for SurrealProcessor {
             .bind(("edges", input.edges))
             .bind(("toml", input.toml))
             .await?;
-        resp.take::<Option<ServerConfigRevisionEntity>>(0)?.ok_or_else(|| {
-            surrealdb::Error::internal("create config revision returned no row".to_string())
-        })
+        resp.take::<Option<ServerConfigRevisionEntity>>(0)?
+            .ok_or_else(|| {
+                surrealdb::Error::internal("create config revision returned no row".to_string())
+            })
     }
 }
 
+#[derive(Debug)]
 pub struct FindServerConfigRevision {
     pub server: ServerId,
     pub revision: i64,
@@ -94,7 +96,7 @@ pub struct FindServerConfigRevision {
 impl Processor<FindServerConfigRevision> for SurrealProcessor {
     type Output = Option<ServerConfigRevisionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindServerConfigRevision", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindServerConfigRevision", skip(self), err)]
     async fn process(&self, input: FindServerConfigRevision) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -109,6 +111,7 @@ impl Processor<FindServerConfigRevision> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct ListRetainedRevisions {
     pub server: ServerId,
 }
@@ -116,7 +119,7 @@ pub struct ListRetainedRevisions {
 impl Processor<ListRetainedRevisions> for SurrealProcessor {
     type Output = Vec<ServerConfigRevisionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListRetainedRevisions", skip_all, err)]
+    #[tracing::instrument(name = "Query:ListRetainedRevisions", skip(self), err)]
     async fn process(&self, input: ListRetainedRevisions) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -130,6 +133,7 @@ impl Processor<ListRetainedRevisions> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct PruneServerRevisionsBelow {
     pub server: ServerId,
     pub revision: i64,
@@ -138,7 +142,7 @@ pub struct PruneServerRevisionsBelow {
 impl Processor<PruneServerRevisionsBelow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:PruneServerRevisionsBelow", skip_all, err)]
+    #[tracing::instrument(name = "Query:PruneServerRevisionsBelow", skip(self), err)]
     async fn process(&self, input: PruneServerRevisionsBelow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(
@@ -159,7 +163,7 @@ pub struct GcReport {
     pub edges: i64,
 }
 
-pub struct CollectRcuGarbage {}
+pub struct CollectRcuGarbage;
 
 impl Processor<CollectRcuGarbage> for SurrealProcessor {
     type Output = GcReport;
