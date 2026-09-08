@@ -1,7 +1,7 @@
 use crate::BoxError;
-use guru_worker_config::LoadBalanceStrategy;
 use crate::pipe::{TargetStream, connect_target};
 use crate::prepared::Target;
+use guru_worker_config::LoadBalanceStrategy;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;

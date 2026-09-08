@@ -39,9 +39,9 @@
 //! }
 //! ```
 
-pub mod middleware;
 mod auth_service;
+pub mod middleware;
 
-pub use auth_service::AuthGrpc;
-pub use middleware::{AuthLayer, AuthMiddleware, API_KEY_METADATA, SESSION_ID_METADATA};
 pub use crate::services::{Identity, IdentityKind};
+pub use auth_service::AuthGrpc;
+pub use middleware::{API_KEY_METADATA, AuthLayer, AuthMiddleware, SESSION_ID_METADATA};

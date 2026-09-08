@@ -56,7 +56,10 @@ impl Processor<Login> for SessionService {
     #[tracing::instrument(name = "Service:Login", skip_all, err)]
     async fn process(&self, input: Login) -> Result<Self::Output, Self::Error> {
         let email = normalize_email(&input.email);
-        let account = self.db.process(FindAccountByEmail { email: &email }).await?;
+        let account = self
+            .db
+            .process(FindAccountByEmail { email: &email })
+            .await?;
         let account = match account {
             Some(account) => account,
             None => {

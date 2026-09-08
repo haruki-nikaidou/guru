@@ -8,8 +8,7 @@ use crate::BoxError;
 use crate::state::{self, LastKnownGood};
 use crate::supervisor::Supervisor;
 use rpguru_sdk::orchestration_agent::{
-    AckConfigRequest, RegisterRequest, WatchConfigRequest,
-    worker_agent_client::WorkerAgentClient,
+    AckConfigRequest, RegisterRequest, WatchConfigRequest, worker_agent_client::WorkerAgentClient,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,7 +109,11 @@ async fn session(
             },
         };
         if let Some(error) = &error {
-            tracing::error!(revision = revision.revision, error, "config revision rejected");
+            tracing::error!(
+                revision = revision.revision,
+                error,
+                "config revision rejected"
+            );
         }
 
         let mut ack = tonic::Request::new(AckConfigRequest {

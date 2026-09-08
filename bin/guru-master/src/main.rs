@@ -21,15 +21,15 @@ use auth::utils::password::Argon2PasswordAlgorithm;
 use clap::Parser;
 use kanau::processor::Processor;
 use orchestration::hooks::gc::{GcTick, RcuGarbageCollector};
-use orchestration::services::watch::{self, WatchHub};
-use orchestration::rpc::{OrchestrationGrpc, WorkerAgentGrpc};
 use orchestration::rpc::agent_middleware::AgentLayer;
+use orchestration::rpc::{OrchestrationGrpc, WorkerAgentGrpc};
 use orchestration::services::agent::AgentService;
 use orchestration::services::canvas::CanvasService;
 use orchestration::services::edge::EdgeService;
 use orchestration::services::node::NodeService;
 use orchestration::services::rollout::RolloutService;
 use orchestration::services::server::ServerService;
+use orchestration::services::watch::{self, WatchHub};
 use rpguru_sdk::auth::auth_server::AuthServer;
 use rpguru_sdk::orchestration::orchestration_server::OrchestrationServer;
 use rpguru_sdk::orchestration_agent::worker_agent_server::WorkerAgentServer;
@@ -54,9 +54,18 @@ enum WorkerMode {
 #[derive(Debug, Parser)]
 #[command(name = "guru-master", about = "guru control plane")]
 struct Cli {
-    #[arg(long, env = "GURU_WORKER_MODE", value_enum, default_value = "dashboard_grpc")]
+    #[arg(
+        long,
+        env = "GURU_WORKER_MODE",
+        value_enum,
+        default_value = "dashboard_grpc"
+    )]
     mode: WorkerMode,
-    #[arg(long, env = "GURU_DASHBOARD_GRPC_ADDR", default_value = "0.0.0.0:50051")]
+    #[arg(
+        long,
+        env = "GURU_DASHBOARD_GRPC_ADDR",
+        default_value = "0.0.0.0:50051"
+    )]
     dashboard_addr: SocketAddr,
     #[arg(long, env = "GURU_WORKERS_GRPC_ADDR", default_value = "0.0.0.0:50052")]
     workers_addr: SocketAddr,

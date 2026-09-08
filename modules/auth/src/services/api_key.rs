@@ -113,7 +113,13 @@ impl Processor<AuthenticateApiKey> for ApiKeyService {
     #[tracing::instrument(name = "Service:AuthenticateApiKey", skip_all, err)]
     async fn process(&self, input: AuthenticateApiKey) -> Result<Self::Output, Self::Error> {
         let digest = sha256_hex(&input.secret);
-        let key = match self.db.process(FindApiKeyByDigest { secret_sha256: digest }).await? {
+        let key = match self
+            .db
+            .process(FindApiKeyByDigest {
+                secret_sha256: digest,
+            })
+            .await?
+        {
             Some(key) => key,
             None => return Ok(None),
         };

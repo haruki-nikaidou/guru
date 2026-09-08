@@ -287,9 +287,7 @@ where
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let row = db
-            .process(FindServerById {
-                id: server.clone(),
-            })
+            .process(FindServerById { id: server.clone() })
             .await
             .unwrap()
             .unwrap();
@@ -409,9 +407,7 @@ async fn registering_again_supersedes_the_previous_refresh_key() -> TestResult {
         server_id: server_key.clone(),
         running_revision: 0,
     });
-    request
-        .metadata_mut()
-        .insert("x-api-key", api_key.parse()?);
+    request.metadata_mut().insert("x-api-key", api_key.parse()?);
     let first_key = client.register(request).await?.into_inner().refresh_key;
 
     // A second registration (a worker restart) rotates the key.
@@ -419,9 +415,7 @@ async fn registering_again_supersedes_the_previous_refresh_key() -> TestResult {
         server_id: server_key.clone(),
         running_revision: 0,
     });
-    request
-        .metadata_mut()
-        .insert("x-api-key", api_key.parse()?);
+    request.metadata_mut().insert("x-api-key", api_key.parse()?);
     let second_key = client.register(request).await?.into_inner().refresh_key;
     assert_ne!(first_key, second_key);
 
@@ -463,9 +457,7 @@ async fn registering_again_supersedes_the_previous_refresh_key() -> TestResult {
         .expect("the refresh key survives a master restart");
     let row = master
         .db
-        .process(FindServerById {
-            id: canvas.server,
-        })
+        .process(FindServerById { id: canvas.server })
         .await?
         .unwrap();
     assert_eq!(row.applied_revision, row.desired_revision);
