@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use kanau::processor::Processor;
 use orchestration::entities::surreal::canvas::{CanvasEntity, CanvasUiPosition, CreateCanvas};
 use orchestration::entities::surreal::node::{
     CreateNodeRow, NewPort, NodeSpec, NodeWithPorts, PodConfig,
@@ -8,7 +9,6 @@ use orchestration::entities::surreal::port::{PortDirection, PortKind};
 use orchestration::entities::surreal::server::{
     CreateServer, CreateServerIp, ServerEntity, ServerIpRecordEntity, ServerIpv6Resolve,
 };
-use kanau::processor::Processor;
 use wakuwaku::surreal::SurrealProcessor;
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;

@@ -173,11 +173,10 @@ impl Processor<DeleteServer> for ServerService {
             .await?;
         let server_key = record_key(&input.server.0);
         let owns_live_pod = topology.nodes.iter().any(|node| match &node.node.spec {
-            NodeSpec::Pod(cfg) => topology
-                .ips
-                .iter()
-                .any(|ip| record_key(&ip.id.0) == record_key(&cfg.ip.0)
-                    && record_key(&ip.server.0) == server_key),
+            NodeSpec::Pod(cfg) => topology.ips.iter().any(|ip| {
+                record_key(&ip.id.0) == record_key(&cfg.ip.0)
+                    && record_key(&ip.server.0) == server_key
+            }),
             _ => false,
         });
         if owns_live_pod {

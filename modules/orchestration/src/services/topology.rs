@@ -391,15 +391,9 @@ fn expected_ports(spec: &NodeSpec) -> Option<Vec<(PortKind, PortDirection, Multi
     use PortDirection::{Input, Output};
     use PortKind::{DeriveDestination, DeriveListen};
     Some(match spec {
-        NodeSpec::Pod(_) => vec![
-            (DeriveListen, Output, One),
-            (DeriveDestination, Input, One),
-        ],
+        NodeSpec::Pod(_) => vec![(DeriveListen, Output, One), (DeriveDestination, Input, One)],
         NodeSpec::Entry(_) => vec![(DeriveListen, Input, One)],
-        NodeSpec::Relay(_) => vec![
-            (DeriveListen, Input, One),
-            (DeriveDestination, Output, One),
-        ],
+        NodeSpec::Relay(_) => vec![(DeriveListen, Input, One), (DeriveDestination, Output, One)],
         NodeSpec::Exit(_) => vec![(DeriveDestination, Output, One)],
         NodeSpec::LoadBalanceDistribute(_) => vec![
             (DeriveDestination, Input, AtLeastTwo),
@@ -480,9 +474,7 @@ fn check_specs(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
                     );
                 }
             }
-            NodeSpec::Exit(cfg)
-                if guru_worker_config::Remote::parse(&cfg.destination).is_err() =>
-            {
+            NodeSpec::Exit(cfg) if guru_worker_config::Remote::parse(&cfg.destination).is_err() => {
                 out.push(
                     TopologyProblem::error(
                         ProblemKind::ExitDestinationInvalid,
@@ -551,7 +543,11 @@ fn dependency_graph(index: &Index<'_>) -> HashMap<String, Vec<String>> {
     for node in index.nodes.values() {
         let key = record_key(&node.node.id.0);
         let deps = graph.entry(key).or_default();
-        for port in node.ports.iter().filter(|p| p.direction == PortDirection::Input) {
+        for port in node
+            .ports
+            .iter()
+            .filter(|p| p.direction == PortDirection::Input)
+        {
             if let Some(peer) = index.peer(port) {
                 deps.push(record_key(&peer.node.id.0));
             }
@@ -714,7 +710,9 @@ fn check_warnings(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
                 }
             }
             NodeSpec::Relay(_) => {
-                let listen_pod = index.port_by_key(node, "listen").and_then(|p| index.peer(p));
+                let listen_pod = index
+                    .port_by_key(node, "listen")
+                    .and_then(|p| index.peer(p));
                 let target_pod = index
                     .port_by_key(node, "destination")
                     .and_then(|p| index.peer(p));
@@ -768,7 +766,10 @@ fn pod_server(index: &Index<'_>, pod: &NodeWithPorts) -> Option<String> {
 fn sorted_nodes<'a>(index: &Index<'a>) -> Vec<&'a NodeWithPorts> {
     let mut keys: Vec<&String> = index.nodes.keys().collect();
     keys.sort();
-    keys.into_iter().filter_map(|k| index.nodes.get(k)).copied().collect()
+    keys.into_iter()
+        .filter_map(|k| index.nodes.get(k))
+        .copied()
+        .collect()
 }
 
 fn kind_name(kind: PortKind) -> &'static str {

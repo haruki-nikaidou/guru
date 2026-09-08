@@ -335,9 +335,21 @@ fn problem_to_proto(problem: &TopologyProblem) -> pb::Problem {
         }
         .into(),
         message: problem.message.clone(),
-        node_ids: problem.nodes.iter().map(|n| ids::record_key(&n.0)).collect(),
-        edge_ids: problem.edges.iter().map(|e| ids::record_key(&e.0)).collect(),
-        port_ids: problem.ports.iter().map(|p| ids::record_key(&p.0)).collect(),
+        node_ids: problem
+            .nodes
+            .iter()
+            .map(|n| ids::record_key(&n.0))
+            .collect(),
+        edge_ids: problem
+            .edges
+            .iter()
+            .map(|e| ids::record_key(&e.0))
+            .collect(),
+        port_ids: problem
+            .ports
+            .iter()
+            .map(|p| ids::record_key(&p.0))
+            .collect(),
     }
 }
 
@@ -369,7 +381,10 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
         request: Request<pb::ListCanvasesRequest>,
     ) -> Result<Response<pb::ListCanvasesReply>, Status> {
         let actor = auth::rpc::middleware::from_request(&request)?;
-        let canvases = self.canvases.process(canvas::ListCanvases { actor }).await?;
+        let canvases = self
+            .canvases
+            .process(canvas::ListCanvases { actor })
+            .await?;
         Ok(Response::new(pb::ListCanvasesReply {
             canvases: canvases.iter().map(canvas_to_proto).collect(),
         }))

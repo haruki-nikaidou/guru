@@ -68,8 +68,7 @@ where
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
             if let Some(secret) = secret
-                && let Ok(Some(identity)) =
-                    agents.process(AuthenticateRefreshKey { secret }).await
+                && let Ok(Some(identity)) = agents.process(AuthenticateRefreshKey { secret }).await
             {
                 req.extensions_mut().insert(identity);
             }

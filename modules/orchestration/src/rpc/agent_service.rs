@@ -3,8 +3,8 @@
 use crate::entities::surreal::revision::FindServerConfigRevision;
 use crate::entities::surreal::server::FindServerById;
 use crate::rpc::agent_middleware::agent_from_request;
-use crate::services::watch::{AgentSignal, WatchHub};
 use crate::services::agent::{AckConfig, AgentService, RegisterWorker};
+use crate::services::watch::{AgentSignal, WatchHub};
 use crate::utils::ids;
 use kanau::processor::Processor;
 use rpguru_sdk::orchestration_agent as pb;
@@ -85,7 +85,9 @@ impl pb::worker_agent_server::WorkerAgent for WorkerAgentGrpc {
         // Send what the server should be running right now; revision 0 means the
         // canvas has never been stamped and there is nothing to send yet.
         if server.desired_revision > 0
-            && let Some(toml) = self.revision_toml(&server.id, server.desired_revision).await
+            && let Some(toml) = self
+                .revision_toml(&server.id, server.desired_revision)
+                .await
             && tx
                 .send(Ok(pb::ConfigRevision {
                     revision: server.desired_revision,

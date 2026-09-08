@@ -54,8 +54,8 @@ fn assert_golden(name: &str, toml: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, toml).unwrap();
     }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let expected =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert_eq!(toml, expected, "derived config for {name} changed");
     guru_worker_config::Config::from_toml_str(toml)
         .unwrap_or_else(|e| panic!("emitted config for {name} does not parse: {e}"));
@@ -94,7 +94,11 @@ fn load_balance_members_follow_port_position() {
     let s = b.server("tokyo");
     let ip = b.ip("ip1", &s, "203.0.113.10");
     b.named_node("pod", "edge", pod(&ip, 443), pod_ports());
-    b.node("entry", entry(Some(ProxyProtocolVersion::V2)), entry_ports());
+    b.node(
+        "entry",
+        entry(Some(ProxyProtocolVersion::V2)),
+        entry_ports(),
+    );
     b.node(
         "lb",
         NodeSpec::LoadBalanceDistribute(LoadBalanceDistributeConfig {
@@ -122,7 +126,9 @@ fn load_balance_members_follow_port_position() {
     let destinations: Vec<String> = members
         .iter()
         .map(|m| match m {
-            guru_worker_config::ForwardingTo::Exit { destination, .. } => format!("{destination:?}"),
+            guru_worker_config::ForwardingTo::Exit { destination, .. } => {
+                format!("{destination:?}")
+            }
             other => panic!("expected exits, got {other:?}"),
         })
         .collect();
@@ -168,10 +174,20 @@ fn relay_chain() -> (Builder, ServerId, ServerId, ServerId) {
     // Tokyo takes client traffic and relays it to Osaka.
     b.named_node("pod_tokyo", "ingress", pod(&ip_tokyo, 443), pod_ports());
     b.node("entry", entry(None), entry_ports());
-    b.named_node("relay_osaka", "to-osaka", relay(RelayProtocol::TcpRaw), relay_ports());
+    b.named_node(
+        "relay_osaka",
+        "to-osaka",
+        relay(RelayProtocol::TcpRaw),
+        relay_ports(),
+    );
     // Osaka's pod terminates the relay and hands off to the next relay.
     b.named_node("pod_osaka", "osaka-hop", pod(&ip_osaka, 9443), pod_ports());
-    b.named_node("relay_sg", "to-singapore", relay(RelayProtocol::TcpRaw), relay_ports());
+    b.named_node(
+        "relay_sg",
+        "to-singapore",
+        relay(RelayProtocol::TcpRaw),
+        relay_ports(),
+    );
     // Singapore's pod exits to the origin.
     b.named_node("pod_sg", "singapore-hop", pod(&ip_sg, 9443), pod_ports());
     b.node("exit", exit("10.0.0.5:8080"), exit_ports());

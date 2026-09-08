@@ -224,7 +224,10 @@ fn two_pods_may_not_share_a_listen_address() {
             exit_ports(),
         );
         b.connect(&format!("{tag}-listen"), &format!("{tag}_entry-listen"));
-        b.connect(&format!("{tag}_exit-destination"), &format!("{tag}-destination"));
+        b.connect(
+            &format!("{tag}_exit-destination"),
+            &format!("{tag}-destination"),
+        );
     }
     let problems = analyze(&b.build());
     assert_eq!(errors(&problems), vec![ProblemKind::DuplicateListen]);
@@ -241,7 +244,10 @@ fn a_relay_loop_is_a_cycle() {
     b.connect("pod-listen", "relay-listen");
     b.connect("relay-destination", "pod-destination");
     let problems = analyze(&b.build());
-    assert!(errors(&problems).contains(&ProblemKind::Cycle), "{problems:?}");
+    assert!(
+        errors(&problems).contains(&ProblemKind::Cycle),
+        "{problems:?}"
+    );
 }
 
 #[test]
@@ -272,7 +278,11 @@ fn ip_hash_needs_the_client_address() {
     let s = ok.server("tokyo");
     let ip = ok.ip("ip1", &s, "203.0.113.10");
     ok.node("pod", pod(&ip, 443), pod_ports());
-    ok.node("entry", entry(Some(ProxyProtocolVersion::V2)), entry_ports());
+    ok.node(
+        "entry",
+        entry(Some(ProxyProtocolVersion::V2)),
+        entry_ports(),
+    );
     ok.node(
         "lb",
         NodeSpec::LoadBalanceDistribute(LoadBalanceDistributeConfig {
@@ -329,7 +339,10 @@ fn an_unconnected_pod_port_is_a_warning() {
     let problems = analyze(&topology);
     assert!(errors(&problems).is_empty(), "{problems:?}");
     assert_eq!(warnings(&problems), vec![ProblemKind::PodPortUnconnected]);
-    assert!(ensure_valid(&topology).is_ok(), "warnings never block a write");
+    assert!(
+        ensure_valid(&topology).is_ok(),
+        "warnings never block a write"
+    );
 }
 
 #[test]

@@ -23,7 +23,9 @@ use std::net::{IpAddr, SocketAddr};
 pub enum DeriveError {
     #[error("entry {node} uses TLS, which needs certificates from a later stage")]
     TlsNotYetSupported { node: String },
-    #[error("relay {node} uses protocol {protocol}, which needs the internal CA from a later stage")]
+    #[error(
+        "relay {node} uses protocol {protocol}, which needs the internal CA from a later stage"
+    )]
     RelayProtocolNotYetSupported {
         node: String,
         protocol: &'static str,
@@ -84,12 +86,12 @@ pub fn derive_server_config(
         let NodeSpec::Pod(cfg) = &pod.node.spec else {
             continue;
         };
-        let ip = index.ip(&record_key(&cfg.ip.0)).ok_or_else(|| {
-            DeriveError::MissingIpRecord {
+        let ip = index
+            .ip(&record_key(&cfg.ip.0))
+            .ok_or_else(|| DeriveError::MissingIpRecord {
                 node: pod.node.name.clone(),
                 ip: record_key(&cfg.ip.0),
-            }
-        })?;
+            })?;
         if record_key(&ip.server.0) != server_key {
             continue;
         }
@@ -99,10 +101,9 @@ pub fn derive_server_config(
         ) else {
             continue;
         };
-        let (Some(listen_edge), Some(destination_edge)) = (
-            index.edge_on(listen_port),
-            index.edge_on(destination_port),
-        ) else {
+        let (Some(listen_edge), Some(destination_edge)) =
+            (index.edge_on(listen_port), index.edge_on(destination_port))
+        else {
             // A pod with an unconnected port is reported as a warning and skipped.
             continue;
         };
@@ -124,10 +125,7 @@ pub fn derive_server_config(
                         node: consumer.node.name.clone(),
                     });
                 }
-                (
-                    ListenAs::Raw,
-                    entry.receive_proxy_protocol.map(Into::into),
-                )
+                (ListenAs::Raw, entry.receive_proxy_protocol.map(Into::into))
             }
             NodeSpec::Relay(relay) => match relay.protocol {
                 // The worker auto-detects PROXY on relay ingest.
@@ -150,11 +148,12 @@ pub fn derive_server_config(
         used.edge(&listen_edge.id);
         used.edge(&destination_edge.id);
 
-        let producer = index
-            .peer(destination_port)
-            .ok_or_else(|| DeriveError::UnsupportedSpec {
-                node: pod.node.name.clone(),
-            })?;
+        let producer =
+            index
+                .peer(destination_port)
+                .ok_or_else(|| DeriveError::UnsupportedSpec {
+                    node: pod.node.name.clone(),
+                })?;
         let mut visited = Vec::new();
         let to = derive_destination(&index, producer, &mut visited, &mut used)?;
 
@@ -235,12 +234,12 @@ fn derive_destination(
             };
             used.node(&pod.node.id);
             used.edge(&listen_edge.id);
-            let pod_ip = index
-                .ip(&record_key(&pod_cfg.ip.0))
-                .ok_or_else(|| DeriveError::MissingIpRecord {
+            let pod_ip = index.ip(&record_key(&pod_cfg.ip.0)).ok_or_else(|| {
+                DeriveError::MissingIpRecord {
                     node: pod.node.name.clone(),
                     ip: record_key(&pod_cfg.ip.0),
-                })?;
+                }
+            })?;
             let host = cfg
                 .override_ip_address
                 .clone()
@@ -275,12 +274,11 @@ fn derive_destination(
             }))
         }
         NodeSpec::LoadBalanceAggregate(_) => {
-            let port = inputs_in_order(node)
-                .into_iter()
-                .next()
-                .ok_or_else(|| DeriveError::UnsupportedSpec {
+            let port = inputs_in_order(node).into_iter().next().ok_or_else(|| {
+                DeriveError::UnsupportedSpec {
                     node: node.node.name.clone(),
-                })?;
+                }
+            })?;
             let (Some(edge), Some(source)) = (index.edge_on(port), index.peer(port)) else {
                 return Err(DeriveError::UnsupportedSpec {
                     node: node.node.name.clone(),
@@ -289,7 +287,9 @@ fn derive_destination(
             used.edge(&edge.id);
             derive_destination(index, source, visited, used)?
         }
-        NodeSpec::Pod(_) | NodeSpec::Entry(_) | NodeSpec::CanvasImport(_)
+        NodeSpec::Pod(_)
+        | NodeSpec::Entry(_)
+        | NodeSpec::CanvasImport(_)
         | NodeSpec::CanvasExport(_) => {
             return Err(DeriveError::UnsupportedSpec {
                 node: node.node.name.clone(),
