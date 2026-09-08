@@ -31,6 +31,7 @@ pub struct CanvasContents {
     pub edges: Vec<EdgeConnectionEntity>,
 }
 
+#[derive(Debug)]
 pub struct CreateCanvas {
     pub name: String,
     pub description: String,
@@ -39,7 +40,7 @@ pub struct CreateCanvas {
 impl Processor<CreateCanvas> for SurrealProcessor {
     type Output = CanvasEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:CreateCanvas", skip_all, err)]
+    #[tracing::instrument(name = "Query:CreateCanvas", skip(self), err)]
     async fn process(&self, input: CreateCanvas) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -49,24 +50,30 @@ impl Processor<CreateCanvas> for SurrealProcessor {
             .bind(("name", input.name))
             .bind(("description", input.description))
             .await?;
-        resp.take::<Option<CanvasEntity>>(0)?.ok_or_else(|| {
-            surrealdb::Error::internal("create canvas returned no row".to_string())
-        })
+        resp.take::<Option<CanvasEntity>>(0)?
+            .ok_or_else(|| surrealdb::Error::internal("create canvas returned no row".to_string()))
     }
 }
 
-pub struct ListCanvases {}
+#[derive(Debug)]
+pub struct ListCanvases;
 
 impl Processor<ListCanvases> for SurrealProcessor {
     type Output = Vec<CanvasEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListCanvases", skip_all, err)]
+    #[tracing::instrument(name = "Query:ListCanvases", skip(self), err, fields(result_count))]
     async fn process(&self, _input: ListCanvases) -> Result<Self::Output, Self::Error> {
-        let mut resp = self.db().query("SELECT * FROM orchestration_canvas").await?;
-        resp.take::<Vec<CanvasEntity>>(0)
+        let mut resp = self
+            .db()
+            .query("SELECT * FROM orchestration_canvas")
+            .await?;
+        let result = resp.take::<Vec<CanvasEntity>>(0)?;
+        tracing::Span::current().record("result_count", result.len());
+        Ok(result)
     }
 }
 
+#[derive(Debug)]
 pub struct FindCanvasById {
     pub id: CanvasId,
 }
@@ -74,7 +81,7 @@ pub struct FindCanvasById {
 impl Processor<FindCanvasById> for SurrealProcessor {
     type Output = Option<CanvasEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindCanvasById", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindCanvasById", skip(self), err)]
     async fn process(&self, input: FindCanvasById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -85,6 +92,7 @@ impl Processor<FindCanvasById> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct UpdateCanvasMeta {
     pub id: CanvasId,
     pub name: String,
@@ -94,7 +102,7 @@ pub struct UpdateCanvasMeta {
 impl Processor<UpdateCanvasMeta> for SurrealProcessor {
     type Output = CanvasEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:UpdateCanvasMeta", skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateCanvasMeta", skip_all, err, fields(canvas_id = ?input.id))]
     async fn process(&self, input: UpdateCanvasMeta) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -108,6 +116,7 @@ impl Processor<UpdateCanvasMeta> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct DeleteCanvasRow {
     pub id: CanvasId,
 }
@@ -115,7 +124,7 @@ pub struct DeleteCanvasRow {
 impl Processor<DeleteCanvasRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:DeleteCanvasRow", skip_all, err)]
+    #[tracing::instrument(name = "Query-Transaction:DeleteCanvasRow", skip_all, err, fields(canvas_id = ?input.id))]
     async fn process(&self, input: DeleteCanvasRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(

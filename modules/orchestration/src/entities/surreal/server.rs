@@ -76,7 +76,7 @@ pub struct CreateServer {
 impl Processor<CreateServer> for SurrealProcessor {
     type Output = ServerEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:CreateServer", skip_all, err)]
+    #[tracing::instrument(name = "Query:CreateServer", skip_all, err, fields(canvas = ?input.canvas))]
     async fn process(&self, input: CreateServer) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -97,12 +97,12 @@ impl Processor<CreateServer> for SurrealProcessor {
             .bind(("ipv6_resolve", input.ipv6_resolve))
             .bind(("log_level", input.log_level))
             .await?;
-        resp.take::<Option<ServerEntity>>(0)?.ok_or_else(|| {
-            surrealdb::Error::internal("create server returned no row".to_string())
-        })
+        resp.take::<Option<ServerEntity>>(0)?
+            .ok_or_else(|| surrealdb::Error::internal("create server returned no row".to_string()))
     }
 }
 
+#[derive(Debug)]
 pub struct FindServerById {
     pub id: ServerId,
 }
@@ -110,7 +110,7 @@ pub struct FindServerById {
 impl Processor<FindServerById> for SurrealProcessor {
     type Output = Option<ServerEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindServerById", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindServerById", skip(self), err)]
     async fn process(&self, input: FindServerById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -121,6 +121,7 @@ impl Processor<FindServerById> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct ListServersByCanvas {
     pub canvas: CanvasId,
 }
@@ -128,7 +129,7 @@ pub struct ListServersByCanvas {
 impl Processor<ListServersByCanvas> for SurrealProcessor {
     type Output = Vec<ServerEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListServersByCanvas", skip_all, err)]
+    #[tracing::instrument(name = "Query:ListServersByCanvas", skip(self), err)]
     async fn process(&self, input: ListServersByCanvas) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -151,7 +152,7 @@ pub struct UpdateServerSettings {
 impl Processor<UpdateServerSettings> for SurrealProcessor {
     type Output = ServerEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:UpdateServerSettings", skip_all, err)]
+    #[tracing::instrument(name = "Query:UpdateServerSettings", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: UpdateServerSettings) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -179,7 +180,7 @@ pub struct MoveServerPosition {
 impl Processor<MoveServerPosition> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:MoveServerPosition", skip_all, err)]
+    #[tracing::instrument(name = "Query:MoveServerPosition", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: MoveServerPosition) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $id SET position = $position")
@@ -191,6 +192,7 @@ impl Processor<MoveServerPosition> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct DeleteServerRow {
     pub id: ServerId,
 }
@@ -198,7 +200,7 @@ pub struct DeleteServerRow {
 impl Processor<DeleteServerRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:DeleteServerRow", skip_all, err)]
+    #[tracing::instrument(name = "Query-Transaction:DeleteServerRow", skip(self), err)]
     async fn process(&self, input: DeleteServerRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(
@@ -224,7 +226,7 @@ pub struct CreateServerIp {
 impl Processor<CreateServerIp> for SurrealProcessor {
     type Output = ServerIpRecordEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:CreateServerIp", skip_all, err)]
+    #[tracing::instrument(name = "Query:CreateServerIp", skip_all, err, fields(server = ?input.server))]
     async fn process(&self, input: CreateServerIp) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -235,12 +237,14 @@ impl Processor<CreateServerIp> for SurrealProcessor {
             .bind(("ip", input.ip))
             .bind(("country", input.country))
             .await?;
-        resp.take::<Option<ServerIpRecordEntity>>(0)?.ok_or_else(|| {
-            surrealdb::Error::internal("create server ip returned no row".to_string())
-        })
+        resp.take::<Option<ServerIpRecordEntity>>(0)?
+            .ok_or_else(|| {
+                surrealdb::Error::internal("create server ip returned no row".to_string())
+            })
     }
 }
 
+#[derive(Debug)]
 pub struct FindServerIpById {
     pub id: ServerIpRecordId,
 }
@@ -248,7 +252,7 @@ pub struct FindServerIpById {
 impl Processor<FindServerIpById> for SurrealProcessor {
     type Output = Option<ServerIpRecordEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindServerIpById", skip_all, err)]
+    #[tracing::instrument(name = "Query:FindServerIpById", skip(self), err)]
     async fn process(&self, input: FindServerIpById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -259,6 +263,7 @@ impl Processor<FindServerIpById> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct ListServerIpsByCanvas {
     pub canvas: CanvasId,
 }
@@ -266,7 +271,7 @@ pub struct ListServerIpsByCanvas {
 impl Processor<ListServerIpsByCanvas> for SurrealProcessor {
     type Output = Vec<ServerIpRecordEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListServerIpsByCanvas", skip_all, err)]
+    #[tracing::instrument(name = "Query:ListServerIpsByCanvas", skip(self), err)]
     async fn process(&self, input: ListServerIpsByCanvas) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -277,6 +282,7 @@ impl Processor<ListServerIpsByCanvas> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct DeleteServerIpRow {
     pub id: ServerIpRecordId,
 }
@@ -284,7 +290,7 @@ pub struct DeleteServerIpRow {
 impl Processor<DeleteServerIpRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:DeleteServerIpRow", skip_all, err)]
+    #[tracing::instrument(name = "Query:DeleteServerIpRow", skip(self), err)]
     async fn process(&self, input: DeleteServerIpRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("DELETE $id")
@@ -306,7 +312,7 @@ pub struct RotateServerRefreshKey {
 impl Processor<RotateServerRefreshKey> for SurrealProcessor {
     type Output = i64;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:RotateServerRefreshKey", skip_all, err)]
+    #[tracing::instrument(name = "Query:RotateServerRefreshKey", skip_all, err, fields(server = ?input.server))]
     async fn process(&self, input: RotateServerRefreshKey) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -347,6 +353,7 @@ impl Processor<FindServerByRefreshKeyDigest> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct SetServerDesiredRevision {
     pub server: ServerId,
     pub revision: i64,
@@ -355,7 +362,7 @@ pub struct SetServerDesiredRevision {
 impl Processor<SetServerDesiredRevision> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:SetServerDesiredRevision", skip_all, err)]
+    #[tracing::instrument(name = "Query:SetServerDesiredRevision", skip(self), err)]
     async fn process(&self, input: SetServerDesiredRevision) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $server SET desired_revision = $revision, last_apply_error = NONE")
@@ -367,6 +374,7 @@ impl Processor<SetServerDesiredRevision> for SurrealProcessor {
     }
 }
 
+#[derive(Debug)]
 pub struct MarkServerApplied {
     pub server: ServerId,
     pub revision: i64,
@@ -375,7 +383,7 @@ pub struct MarkServerApplied {
 impl Processor<MarkServerApplied> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:MarkServerApplied", skip_all, err)]
+    #[tracing::instrument(name = "Query:MarkServerApplied", skip(self), err)]
     async fn process(&self, input: MarkServerApplied) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $server SET applied_revision = $revision, last_apply_error = NONE")
@@ -395,7 +403,7 @@ pub struct SetServerApplyError {
 impl Processor<SetServerApplyError> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:SetServerApplyError", skip_all, err)]
+    #[tracing::instrument(name = "Query:SetServerApplyError", skip_all, err, fields(server = ?input.server))]
     async fn process(&self, input: SetServerApplyError) -> Result<Self::Output, Self::Error> {
         self.db()
             .query("UPDATE $server SET last_apply_error = $error")
