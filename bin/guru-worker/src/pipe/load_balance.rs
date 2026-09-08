@@ -1,5 +1,5 @@
 use crate::BoxError;
-use crate::config::LoadBalanceStrategy;
+use guru_worker_config::LoadBalanceStrategy;
 use crate::pipe::{TargetStream, connect_target};
 use crate::prepared::Target;
 use std::collections::hash_map::DefaultHasher;

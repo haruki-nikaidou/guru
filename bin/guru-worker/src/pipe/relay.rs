@@ -1,12 +1,12 @@
 use crate::BoxError;
-use crate::config::{Ipv6Resolve, RelayProtocol, Remote, TcpProxyProtocol};
+use guru_worker_config::{Ipv6Resolve, RelayProtocol, Remote, TcpProxyProtocol};
 use crate::pipe::write_proxy_header;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::ReadBuf;
 
-pub(crate) enum RelayStream {
+pub enum RelayStream {
     Tcp(tokio::net::TcpStream),
     Tls(tokio_openssl::SslStream<tokio::net::TcpStream>),
     Quic(tokio::io::Join<quinn::RecvStream, quinn::SendStream>),

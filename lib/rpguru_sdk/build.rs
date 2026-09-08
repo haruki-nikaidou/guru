@@ -3,7 +3,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&[proto_root.join("auth/auth.proto")], &[proto_root])?;
+        .compile_protos(
+            &[
+                proto_root.join("auth/auth.proto"),
+                proto_root.join("orchestration/orchestration.proto"),
+                proto_root.join("orchestration/agent.proto"),
+            ],
+            &[proto_root],
+        )?;
     println!("cargo:rerun-if-changed=../../proto");
     Ok(())
 }

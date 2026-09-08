@@ -9,6 +9,7 @@ license.workspace = true
 # Internal
 auth = { path = "../../modules/auth" }
 base = { path = "../../modules/base" }
+orchestration = { path = "../../modules/orchestration" }
 
 # Runtime
 tokio = { workspace = true }

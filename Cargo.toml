@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "bin/guru-master",
     "bin/guru-worker",
-    "bin/manage-tool", "lib/newtype_record_id",
+    "bin/manage-tool",
+    "lib/guru_worker_config",
+    "lib/newtype_record_id",
     "lib/rpguru_sdk",
     "modules/auth",
     "modules/base",
@@ -93,6 +95,11 @@ opentelemetry-appender-tracing = "0.31"
 
 # Tracing
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Streaming
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Error handling
 anyhow = "1"

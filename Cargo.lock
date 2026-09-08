@@ -1777,23 +1777,30 @@ name = "guru-master"
 version = "0.1.0-alpha"
 dependencies = [
  "amqprs",
+ "auth",
  "axum",
  "base",
+ "chrono",
+ "clap",
  "kanau",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "orchestration",
  "redis",
  "rpguru_sdk",
  "serde",
  "serde_json",
  "surrealdb",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tonic",
  "tower",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "wakuwaku",
 ]
 
@@ -1801,21 +1808,49 @@ dependencies = [
 name = "guru-worker"
 version = "0.1.0"
 dependencies = [
+ "auth",
+ "chrono",
+ "clap",
  "compact_str 0.10.0",
+ "guru_worker_config",
+ "kanau",
  "moka",
  "openssl",
+ "orchestration",
  "ppp",
+ "prost",
  "quinn",
+ "rpguru_sdk",
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
+ "serde_json",
  "smallvec",
+ "surrealdb",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-openssl",
+ "tokio-stream",
  "tokio-util",
  "toml",
+ "tonic",
+ "tonic-prost",
+ "tower",
  "tracing",
  "tracing-subscriber",
+ "wakuwaku",
+]
+
+[[package]]
+name = "guru_worker_config"
+version = "0.1.0-alpha"
+dependencies = [
+ "compact_str 0.10.0",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.20",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -2640,6 +2675,7 @@ dependencies = [
  "chrono",
  "clap",
  "kanau",
+ "orchestration",
  "redis",
  "serde",
  "serde_json",
@@ -3167,9 +3203,11 @@ name = "orchestration"
 version = "0.1.0-alpha"
 dependencies = [
  "amqprs",
+ "auth",
  "bytes",
  "chrono",
  "compact_str 0.9.1",
+ "guru_worker_config",
  "itertools 0.14.0",
  "kanau",
  "newtype_record_id",
@@ -3184,9 +3222,13 @@ dependencies = [
  "smallvec",
  "surrealdb",
  "surrealdb-types",
+ "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-prost",
+ "tower",
  "tracing",
  "uuid",
  "wakuwaku",
@@ -5564,6 +5606,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

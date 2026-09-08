@@ -1,4 +1,4 @@
-use crate::config::TlsHostConfig;
+use guru_worker_config::TlsHostConfig;
 use crate::pipe::AsyncRw;
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector, SslFiletype, SslMethod};
 

@@ -1,0 +1,26 @@
+ipv6_resolve = "tolerated"
+
+[log]
+level = "info"
+
+[[forwarding]]
+tag = "edge"
+listen = "203.0.113.10:443"
+receive_proxy_protocol = "v2"
+listen_as = "raw"
+
+[forwarding.to]
+type = "LoadBalance"
+strategy = "fallback"
+
+[[forwarding.to.members]]
+type = "Exit"
+destination = "10.0.0.5:8080"
+
+[[forwarding.to.members]]
+type = "Exit"
+destination = "backend.internal:9000"
+
+[[forwarding.to.members]]
+type = "Exit"
+destination = "10.0.0.7:8080"

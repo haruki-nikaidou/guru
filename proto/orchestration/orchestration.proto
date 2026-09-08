@@ -1,0 +1,372 @@
+syntax = "proto3";
+
+package guru.orchestration;
+
+// Optional values are encoded uniformly: a `*_UNSPECIFIED` enum value, an unset
+// message field, an empty `string` and a `0` `uint32` all mean "none".
+
+enum ProxyProtocolVersion {
+  PROXY_PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROXY_V1 = 1;
+  PROXY_V2 = 2;
+}
+enum RelayProtocol {
+  RELAY_PROTOCOL_UNSPECIFIED = 0;
+  RELAY_TCP_RAW = 1;
+  RELAY_TCP_TLS = 2;
+  RELAY_QUIC = 3;
+}
+enum LoadBalanceMode {
+  LOAD_BALANCE_MODE_UNSPECIFIED = 0;
+  ROUND_ROBIN = 1;
+  RANDOM = 2;
+  IP_HASH = 3;
+  FALLBACK = 4;
+}
+enum Ipv6Resolve {
+  IPV6_RESOLVE_UNSPECIFIED = 0;
+  IPV6_REQUIRED = 1;
+  IPV6_PREFERRED = 2;
+  IPV6_TOLERATED = 3;
+  IPV6_FORBIDDEN = 4;
+}
+enum PortKind {
+  PORT_KIND_UNSPECIFIED = 0;
+  DERIVE_LISTEN = 1;
+  DERIVE_DESTINATION = 2;
+}
+enum PortDirection {
+  PORT_DIRECTION_UNSPECIFIED = 0;
+  PORT_INPUT = 1;
+  PORT_OUTPUT = 2;
+}
+enum CanvasExportAs {
+  CANVAS_EXPORT_AS_UNSPECIFIED = 0;
+  INPUT_INTO_CANVAS = 1;
+  OUTPUT_OUT_OF_CANVAS = 2;
+}
+enum ProblemSeverity {
+  PROBLEM_SEVERITY_UNSPECIFIED = 0;
+  PROBLEM_ERROR = 1;
+  PROBLEM_WARNING = 2;
+}
+enum ProblemKind {
+  PROBLEM_KIND_UNSPECIFIED = 0;
+  PORT_KIND_MISMATCH = 1;
+  EDGE_DIRECTION_INVALID = 2;
+  EDGE_SELF_NODE = 3;
+  EDGE_CROSS_CANVAS = 4;
+  PORT_OVERSUBSCRIBED = 5;
+  PORT_SHAPE_INVALID = 6;
+  CYCLE = 7;
+  DUPLICATE_LISTEN = 8;
+  POD_IP_FOREIGN = 9;
+  EXIT_DESTINATION_INVALID = 10;
+  IP_HASH_WITHOUT_CLIENT_IP = 11;
+  UNSUPPORTED_SPEC = 12;
+  POD_PORT_UNCONNECTED = 13;
+  RELAY_SAME_SERVER = 14;
+  DISTRIBUTE_SINGLE_MEMBER = 15;
+}
+
+message CanvasUiPosition {
+  int64 x = 1;
+  int64 y = 2;
+}
+message TlsConfig {
+  string sni = 1;
+  string dns_provider_id = 2;
+  string domain_id = 3;
+  string acme_directory = 4;
+}
+message PodConfig {
+  string ip_record_id = 1;
+  uint32 port = 2;
+}
+message EntryConfig {
+  ProxyProtocolVersion receive_proxy_protocol = 1;
+  TlsConfig tls = 2;
+}
+message RelayConfig {
+  RelayProtocol protocol = 1;
+  string override_ip_address = 2;
+  uint32 override_port = 3;
+}
+message ExitConfig {
+  string destination = 1;
+  ProxyProtocolVersion pass_proxy_protocol = 2;
+}
+message LoadBalanceDistributeConfig {
+  LoadBalanceMode mode = 1;
+}
+message LoadBalanceAggregateConfig {}
+message CanvasImportConfig {
+  string canvas_id = 1;
+}
+message CanvasExportConfig {
+  PortKind kind = 1;
+  CanvasExportAs direction = 2;
+}
+message NodeSpec {
+  oneof spec {
+    PodConfig pod = 1;
+    EntryConfig entry = 2;
+    RelayConfig relay = 3;
+    ExitConfig exit = 4;
+    LoadBalanceDistributeConfig load_balance_distribute = 5;
+    LoadBalanceAggregateConfig load_balance_aggregate = 6;
+    CanvasImportConfig canvas_import = 7;
+    CanvasExportConfig canvas_export = 8;
+  }
+}
+
+message Port {
+  string id = 1;
+  string node_id = 2;
+  PortKind kind = 3;
+  PortDirection direction = 4;
+  string key = 5;
+  int64 position = 6;
+}
+// `retiring` is true while the row is retired but not yet garbage-collected.
+message Node {
+  string id = 1;
+  string canvas_id = 2;
+  string name = 3;
+  string comment = 4;
+  NodeSpec spec = 5;
+  CanvasUiPosition position = 6;
+  int64 created_rev = 7;
+  int64 retired_rev = 8;
+  bool retiring = 9;
+  string replaces_id = 10;
+  repeated Port ports = 11;
+}
+message Edge {
+  string id = 1;
+  string source_port_id = 2;
+  string target_port_id = 3;
+  int64 created_rev = 4;
+  int64 retired_rev = 5;
+  bool retiring = 6;
+}
+message ServerIp {
+  string id = 1;
+  string server_id = 2;
+  string ip = 3;
+  string country = 4;
+}
+message Server {
+  string id = 1;
+  string canvas_id = 2;
+  string name = 3;
+  string icon = 4;
+  string comment = 5;
+  CanvasUiPosition position = 6;
+  Ipv6Resolve ipv6_resolve = 7;
+  string log_level = 8;
+  int64 desired_revision = 9;
+  int64 applied_revision = 10;
+  string last_apply_error = 11;
+  string last_seen_at = 12;
+  repeated ServerIp ips = 13;
+}
+message Canvas {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+}
+message Problem {
+  ProblemSeverity severity = 1;
+  ProblemKind kind = 2;
+  string message = 3;
+  repeated string node_ids = 4;
+  repeated string edge_ids = 5;
+  repeated string port_ids = 6;
+}
+message RetainedRevision {
+  int64 revision = 1;
+  string created_at = 2;
+}
+
+message CreateCanvasRequest {
+  string name = 1;
+  string description = 2;
+}
+message CreateCanvasReply {
+  Canvas canvas = 1;
+}
+message ListCanvasesRequest {}
+message ListCanvasesReply {
+  repeated Canvas canvases = 1;
+}
+message GetCanvasRequest {
+  string canvas_id = 1;
+}
+message GetCanvasReply {
+  Canvas canvas = 1;
+  repeated Server servers = 2;
+  repeated Node nodes = 3;
+  repeated Edge edges = 4;
+}
+message UpdateCanvasRequest {
+  string canvas_id = 1;
+  string name = 2;
+  string description = 3;
+}
+message UpdateCanvasReply {
+  Canvas canvas = 1;
+}
+message DeleteCanvasRequest {
+  string canvas_id = 1;
+}
+message DeleteCanvasReply {}
+message ValidateCanvasRequest {
+  string canvas_id = 1;
+}
+message ValidateCanvasReply {
+  repeated Problem problems = 1;
+}
+
+message CreateServerRequest {
+  string canvas_id = 1;
+  string name = 2;
+  string icon = 3;
+  string comment = 4;
+  CanvasUiPosition position = 5;
+  Ipv6Resolve ipv6_resolve = 6;
+  string log_level = 7;
+}
+message CreateServerReply {
+  Server server = 1;
+}
+message UpdateServerRequest {
+  string server_id = 1;
+  string name = 2;
+  string icon = 3;
+  string comment = 4;
+  Ipv6Resolve ipv6_resolve = 5;
+  string log_level = 6;
+}
+message UpdateServerReply {
+  Server server = 1;
+}
+message DeleteServerRequest {
+  string server_id = 1;
+}
+message DeleteServerReply {}
+message MoveServerRequest {
+  string server_id = 1;
+  CanvasUiPosition position = 2;
+}
+message MoveServerReply {}
+message AddServerIpRequest {
+  string server_id = 1;
+  string ip = 2;
+  string country = 3;
+}
+message AddServerIpReply {
+  ServerIp ip = 1;
+}
+message RemoveServerIpRequest {
+  string ip_record_id = 1;
+}
+message RemoveServerIpReply {}
+
+message CreateNodeRequest {
+  string canvas_id = 1;
+  string name = 2;
+  string comment = 3;
+  NodeSpec spec = 4;
+  CanvasUiPosition position = 5;
+  uint32 item_count = 6;
+}
+message CreateNodeReply {
+  Node node = 1;
+}
+message ReplaceNodeSpecRequest {
+  string node_id = 1;
+  NodeSpec spec = 2;
+  uint32 item_count = 3;
+}
+message ReplaceNodeSpecReply {
+  Node node = 1;
+}
+message UpdateNodeMetaRequest {
+  string node_id = 1;
+  string name = 2;
+  string comment = 3;
+  CanvasUiPosition position = 4;
+}
+message UpdateNodeMetaReply {
+  Node node = 1;
+}
+message RetireNodeRequest {
+  string node_id = 1;
+}
+message RetireNodeReply {}
+message ForceDeleteNodeRequest {
+  string node_id = 1;
+}
+message ForceDeleteNodeReply {}
+
+message ConnectRequest {
+  string output_port_id = 1;
+  string input_port_id = 2;
+}
+message ConnectReply {
+  Edge edge = 1;
+}
+message DisconnectRequest {
+  string edge_id = 1;
+}
+message DisconnectReply {}
+message ForceDisconnectRequest {
+  string edge_id = 1;
+}
+message ForceDisconnectReply {}
+
+message GetServerConfigRequest {
+  string server_id = 1;
+}
+message GetServerConfigReply {
+  int64 revision = 1;
+  string toml = 2;
+}
+message GetServerRolloutStatusRequest {
+  string server_id = 1;
+}
+message GetServerRolloutStatusReply {
+  int64 desired_revision = 1;
+  int64 applied_revision = 2;
+  string last_apply_error = 3;
+  string last_seen_at = 4;
+  repeated RetainedRevision retained = 5;
+}
+
+service Orchestration {
+  rpc CreateCanvas(CreateCanvasRequest) returns (CreateCanvasReply);
+  rpc ListCanvases(ListCanvasesRequest) returns (ListCanvasesReply);
+  rpc GetCanvas(GetCanvasRequest) returns (GetCanvasReply);
+  rpc UpdateCanvas(UpdateCanvasRequest) returns (UpdateCanvasReply);
+  rpc DeleteCanvas(DeleteCanvasRequest) returns (DeleteCanvasReply);
+  rpc ValidateCanvas(ValidateCanvasRequest) returns (ValidateCanvasReply);
+  rpc CreateServer(CreateServerRequest) returns (CreateServerReply);
+  rpc UpdateServer(UpdateServerRequest) returns (UpdateServerReply);
+  rpc DeleteServer(DeleteServerRequest) returns (DeleteServerReply);
+  rpc MoveServer(MoveServerRequest) returns (MoveServerReply);
+  rpc AddServerIp(AddServerIpRequest) returns (AddServerIpReply);
+  rpc RemoveServerIp(RemoveServerIpRequest) returns (RemoveServerIpReply);
+  rpc CreateNode(CreateNodeRequest) returns (CreateNodeReply);
+  rpc ReplaceNodeSpec(ReplaceNodeSpecRequest) returns (ReplaceNodeSpecReply);
+  rpc UpdateNodeMeta(UpdateNodeMetaRequest) returns (UpdateNodeMetaReply);
+  rpc RetireNode(RetireNodeRequest) returns (RetireNodeReply);
+  rpc ForceDeleteNode(ForceDeleteNodeRequest) returns (ForceDeleteNodeReply);
+  // `ConnectPorts`, not `Connect`: the generated client already has a `connect`
+  // constructor.
+  rpc ConnectPorts(ConnectRequest) returns (ConnectReply);
+  rpc Disconnect(DisconnectRequest) returns (DisconnectReply);
+  rpc ForceDisconnect(ForceDisconnectRequest) returns (ForceDisconnectReply);
+  rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigReply);
+  rpc GetServerRolloutStatus(GetServerRolloutStatusRequest) returns (GetServerRolloutStatusReply);
+}

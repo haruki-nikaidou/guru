@@ -1,6 +1,8 @@
 use crate::entities::surreal::node::NodeId;
+use kanau::processor::Processor;
 use newtype_record_id::table_record;
-use surrealdb::types::SurrealValue;
+use surrealdb_types::SurrealValue;
+use wakuwaku::surreal::SurrealProcessor;
 
 table_record!(PortId, "orchestration_port");
 
@@ -14,17 +16,34 @@ pub struct PortEntity {
     pub position: i64,
 }
 
-#[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
-#[surreal(untagged)]
+#[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq, Hash)]
+#[surreal(untagged, rename_all = "snake_case")]
 pub enum PortKind {
-    #[surreal(value = "derive_listen")]
     DeriveListen,
-    #[surreal(value = "derive_destination")]
     DeriveDestination,
 }
 
-#[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, SurrealValue, Copy, PartialEq, Eq, Hash)]
+#[surreal(untagged, rename_all = "snake_case")]
 pub enum PortDirection {
     Input,
     Output,
+}
+
+pub struct FindPortById {
+    pub id: PortId,
+}
+
+impl Processor<FindPortById> for SurrealProcessor {
+    type Output = Option<PortEntity>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:FindPortById", skip_all, err)]
+    async fn process(&self, input: FindPortById) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query("SELECT * FROM $id")
+            .bind(("id", input.id))
+            .await?;
+        resp.take::<Option<PortEntity>>(0)
+    }
 }

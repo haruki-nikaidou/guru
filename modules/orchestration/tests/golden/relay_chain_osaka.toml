@@ -1,0 +1,16 @@
+ipv6_resolve = "tolerated"
+
+[log]
+level = "info"
+
+[[forwarding]]
+tag = "osaka-hop"
+listen = "198.51.100.10:9443"
+
+[forwarding.listen_as.relay]
+relay_type = "tcp"
+
+[forwarding.to]
+type = "Relay"
+protocol = "tcp"
+destination = "192.0.2.10:9443"

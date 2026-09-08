@@ -1,0 +1,19 @@
+[package]
+name = "guru_worker_config"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+compact_str = { version = "0.10", features = ["serde"] }
+smallvec = { version = "1.15", features = [
+    "serde",
+    "union",
+    "const_generics",
+    "const_new",
+] }
+toml = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }

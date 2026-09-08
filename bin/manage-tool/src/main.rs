@@ -52,6 +52,21 @@ enum Command {
         #[arg(long)]
         password: String,
     },
+    /// Orchestration maintenance.
+    Orchestration {
+        #[command(subcommand)]
+        command: OrchestrationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OrchestrationCommand {
+    /// Print the derived guru-worker TOML for one server.
+    ExportConfig {
+        /// `orchestration_server` record key.
+        #[arg(long)]
+        server: String,
+    },
 }
 
 #[tokio::main]
@@ -70,7 +85,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::CreateAdmin { email, password } => {
             create_admin(SurrealProcessor::new(db), email, password).await
         }
+        Command::Orchestration {
+            command: OrchestrationCommand::ExportConfig { server },
+        } => export_config(SurrealProcessor::new(db), server).await,
     }
+}
+
+/// Derive one server's worker config from the live canvas, exactly as
+/// `GetServerConfig` does, and print it. No identity is involved: the CLI already
+/// authenticates against the database itself.
+async fn export_config(
+    db: SurrealProcessor,
+    server: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let server_id = orchestration::utils::ids::server_id(&server);
+    let Some(row) = db
+        .process(orchestration::entities::surreal::server::FindServerById {
+            id: server_id.clone(),
+        })
+        .await?
+    else {
+        eprintln!("No server with key {server}");
+        std::process::exit(1);
+    };
+    let topology = db
+        .process(
+            orchestration::entities::surreal::topology::LoadCanvasTopology {
+                canvas: row.canvas,
+            },
+        )
+        .await?;
+    let derived = orchestration::services::derive::derive_server_config(&topology, &server_id)?;
+    print!("{}", derived.toml);
+    Ok(())
 }
 
 /// Create the first administrator account directly via the entity layer (no
