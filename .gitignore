@@ -24,3 +24,5 @@ target
 node_modules/
 .svelte-kit/
 *.tsbuildinfo
+
+omp-session*
