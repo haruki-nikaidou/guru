@@ -22,14 +22,19 @@ pub enum IdentityKind {
 }
 
 impl Identity {
-    /// Authorize a privileged auth-module operation.
+    /// Authorize a privileged operation.
     ///
-    /// Every [`Permission`] in this module is human-only: API-key identities are
-    /// rejected outright regardless of the owning account's role, so a server
-    /// credential can never drive account/key management here. Otherwise the
-    /// role's capability matrix decides.
+    /// The credential kind is decided per permission: [`Permission::ServerCall`]
+    /// is machine-only (a worker registering with an operator API key), every
+    /// other permission is human-session-only, so a server credential can never
+    /// drive account/key management or edit the workspace. The role's capability
+    /// matrix then decides.
     pub fn ensure(&self, permission: Permission) -> Result<(), wakuwaku::Error> {
-        if self.kind == IdentityKind::ApiKey {
+        let kind_ok = match permission {
+            Permission::ServerCall => self.kind == IdentityKind::ApiKey,
+            _ => self.kind == IdentityKind::Session,
+        };
+        if !kind_ok {
             return Err(wakuwaku::Error::PermissionsDenied);
         }
         if self.role.can(permission) {

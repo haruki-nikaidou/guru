@@ -1,5 +1,5 @@
 use crate::BoxError;
-use crate::config::TcpProxyProtocol;
+use guru_worker_config::TcpProxyProtocol;
 use crate::pipe::{Prefixed, read_proxy_header};
 use crate::prepared::Ingest;
 use std::net::SocketAddr;
@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_openssl::SslStream;
 
-pub(crate) enum IngestStream {
+pub enum IngestStream {
     PrefixedTcp(Prefixed<tokio::net::TcpStream>),
     RawTcp(tokio::net::TcpStream),
     TlsPrefixed(SslStream<Prefixed<tokio::net::TcpStream>>),

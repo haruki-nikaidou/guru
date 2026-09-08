@@ -1,0 +1,15 @@
+ipv6_resolve = "tolerated"
+
+[log]
+level = "info"
+
+[[forwarding]]
+tag = "singapore-hop"
+listen = "192.0.2.10:9443"
+
+[forwarding.listen_as.relay]
+relay_type = "tcp"
+
+[forwarding.to]
+type = "Exit"
+destination = "10.0.0.5:8080"

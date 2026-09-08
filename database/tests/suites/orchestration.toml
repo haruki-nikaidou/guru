@@ -1,0 +1,8 @@
+name = "orchestration"
+tags = ["orchestration"]
+
+[[cases]]
+name = "orchestration_tables_visible"
+kind = "schema_metadata"
+sql = "INFO FOR DB;"
+contains = ["orchestration_canvas", "orchestration_server", "server_ip_record", "orchestration_node", "orchestration_port", "orchestration_edge_connection", "orchestration_server_config_revision", "orchestration_revision"]

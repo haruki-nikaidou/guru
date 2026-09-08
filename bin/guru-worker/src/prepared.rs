@@ -1,4 +1,4 @@
-use crate::config::{
+use guru_worker_config::{
     Forwarding, ForwardingTo, Ipv6Resolve, ListenAs, LoadBalanceStrategy, RelayHost, RelayProtocol,
     Remote, TcpProxyProtocol,
 };
@@ -61,7 +61,7 @@ impl PreparedForwarding {
             ListenAs::Relay(RelayHost::Quic(c)) => Some(crate::tls::quic_server_config(c)?),
             _ => None,
         };
-        let target = compile_target(&f.to, f.send_proxy_protocol, ipv6_resolve);
+        let target = compile_target(&f.to, ipv6_resolve);
         Ok(PreparedForwarding {
             forwarding: Arc::new(f.clone()),
             ingest,
@@ -71,16 +71,15 @@ impl PreparedForwarding {
     }
 }
 
-fn compile_target(
-    to: &ForwardingTo,
-    send_pp: Option<TcpProxyProtocol>,
-    ipv6_resolve: Ipv6Resolve,
-) -> Arc<Target> {
+fn compile_target(to: &ForwardingTo, ipv6_resolve: Ipv6Resolve) -> Arc<Target> {
     match to {
-        ForwardingTo::Exit { destination } => Arc::new(Target::Exit {
+        ForwardingTo::Exit {
+            destination,
+            send_proxy_protocol,
+        } => Arc::new(Target::Exit {
             destination: destination.clone(),
             ipv6_resolve,
-            send_pp,
+            send_pp: *send_proxy_protocol,
         }),
         ForwardingTo::Relay {
             protocol,
@@ -96,7 +95,7 @@ fn compile_target(
             let members = g
                 .members
                 .iter()
-                .map(|m| compile_target(m, send_pp, ipv6_resolve))
+                .map(|m| compile_target(m, ipv6_resolve))
                 .collect();
             let seed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

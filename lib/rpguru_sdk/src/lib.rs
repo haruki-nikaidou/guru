@@ -35,3 +35,15 @@
 pub mod auth {
     tonic::include_proto!("guru.auth");
 }
+
+/// Generated types and service traits for `proto/orchestration/orchestration.proto`
+/// (`package guru.orchestration`).
+pub mod orchestration {
+    tonic::include_proto!("guru.orchestration");
+}
+
+/// Generated types and service traits for `proto/orchestration/agent.proto`
+/// (`package guru.orchestration.agent`).
+pub mod orchestration_agent {
+    tonic::include_proto!("guru.orchestration.agent");
+}

@@ -1,31 +1,30 @@
-//! # `base` — the foundational module
+//! # `orchestration` — canvases, servers, nodes and worker rollout
 //!
-//! `base` is the reference/shared module of this workspace. Every business
-//! feature lives in its own `modules/<name>` crate that mirrors the layout of
-//! this crate and depends on `base` for the types and helpers shared across the
-//! whole application (common entities, error types, config primitives,
-//! utilities, and so on).
+//! This module owns the control plane of the proxy fabric: operators build a
+//! **canvas** of servers and nodes, the module validates that topology, derives one
+//! `guru-worker` config per server from it, and streams every new revision to the
+//! workers that registered for it.
 //!
-//! ## Module layout (the convention every module follows)
+//! ## Module layout
 //!
-//! - [`entities`] — persistence layer. Plain data types plus the
-//!   `Processor` implementations that read and
-//!   write them. Split into [`entities::db`] (PostgreSQL rows and queries) and
-//!   [`entities::redis`] (Redis key/value types).
-//! - [`services`] — business logic. Stateful `Processor`s that own their
-//!   dependencies (database, Redis, message queue, other services) and
-//!   orchestrate entities to fulfil a use case.
-//! - [`rpc`] — the transport edge. gRPC service implementations that translate
-//!   protobuf requests into service/entity calls and back.
-//! - [`events`] — AMQP message payloads this module publishes or consumes,
-//!   together with their routing.
-//! - [`hooks`] — background reactors: AMQP consumers, cron jobs, and event
-//!   loggers that run outside the request path.
-//! - [`config`] — strongly typed configuration for the module, stored in the
-//!   database and cached in Redis.
-//! - [`utils`] — small, dependency-light helpers local to the module.
+//! - [`entities`] — persistence layer. SurrealDB row types plus one `Processor` per
+//!   query in [`entities::surreal`], and Redis key/value types in
+//!   [`entities::redis`].
+//! - [`services`] — business logic: canvas/server/node/edge CRUD, the topology
+//!   checker, the config deriver, rollout stamping and the worker agent.
+//! - [`rpc`] — the transport edge: the operator `Orchestration` service and the
+//!   `WorkerAgent` service workers talk to, plus their middleware.
+//! - [`events`] — AMQP payloads this module publishes or consumes.
+//! - [`hooks`] — background reactors, notably the RCU garbage collector.
+//! - [`config`] — typed module configuration.
+//! - [`utils`] — record-id conversion helpers shared by the edge.
 //!
-//! See `AGENTS.md` at the workspace root for the full authoring guide.
+//! ## RCU
+//!
+//! Nodes and edges are never mutated in place: a spec change writes a replacement
+//! row and stamps the old one with the global revision that retired it. A retired
+//! row is deleted only once no retained `orchestration_server_config_revision`
+//! references it, i.e. once every server that ran it has moved on.
 
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]

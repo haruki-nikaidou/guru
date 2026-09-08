@@ -4,7 +4,7 @@ pub mod load_balance;
 pub mod relay;
 
 use crate::BoxError;
-use crate::config::TcpProxyProtocol;
+use guru_worker_config::TcpProxyProtocol;
 use crate::pipe::relay::RelayStream;
 use crate::prepared::{PreparedForwarding, Target};
 use std::net::{IpAddr, SocketAddr};
@@ -186,7 +186,7 @@ pub async fn splice(mut a: impl AsyncRw, mut b: impl AsyncRw) {
     }
 }
 
-pub(crate) enum TargetStream {
+pub enum TargetStream {
     Exit(TcpStream),
     Relay(RelayStream),
 }

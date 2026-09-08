@@ -3,6 +3,7 @@ use surrealdb_types::SurrealValue;
 
 table_record!(DnsProviderId, "dns_provider");
 
+#[derive(Debug, Clone, SurrealValue)]
 pub struct DnsProviderEntity {
     pub id: DnsProviderId,
     pub provider: DnsProvider,
@@ -11,9 +12,8 @@ pub struct DnsProviderEntity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SurrealValue)]
+#[surreal(untagged, rename_all = "snake_case")]
 pub enum DnsProvider {
-    #[surreal(rename = "cloudflare")]
     Cloudflare,
-    #[surreal(rename = "vercel")]
     Vercel,
 }

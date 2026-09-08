@@ -3,6 +3,14 @@ name = "guru-worker"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "guru_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "guru-worker"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 openssl = { version = "0.10", features = ["vendored"] }
@@ -19,3 +27,21 @@ tokio-util = "0.7"
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 moka = { version = "0.12", features = ["future"] }
+guru_worker_config = { path = "../../lib/guru_worker_config" }
+rpguru_sdk = { path = "../../lib/rpguru_sdk" }
+tonic = { workspace = true, features = ["channel"] }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+orchestration = { path = "../../modules/orchestration" }
+auth = { path = "../../modules/auth" }
+wakuwaku = { workspace = true }
+kanau = { workspace = true }
+surrealdb = { workspace = true, features = ["kv-mem"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tower = { workspace = true }
+chrono = { workspace = true }

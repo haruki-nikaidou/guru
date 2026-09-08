@@ -18,6 +18,8 @@ pub enum Permission {
     ViewWorkspace,
     /// Create and edit canvases and settings.
     EditWorkspace,
+    /// Machine-to-master calls made by a `guru-worker` (registration).
+    ServerCall,
 }
 
 impl AccountRole {
@@ -36,6 +38,7 @@ impl AccountRole {
                 Permission::ViewWorkspace
                     | Permission::EditWorkspace
                     | Permission::ManageApiKeys
+                    | Permission::ServerCall
             ),
             AccountRole::Observer => matches!(permission, Permission::ViewWorkspace),
         }

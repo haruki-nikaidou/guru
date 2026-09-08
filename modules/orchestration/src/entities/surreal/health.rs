@@ -1,10 +1,13 @@
+//! Health records reported by workers.
+//!
+//! Stage 1 only declares the row types; the queries land with the health push
+//! pipeline in a later stage.
+
 use crate::entities::surreal::node::NodeId;
 use crate::entities::surreal::server::ServerId;
 use chrono::{DateTime, Utc};
-use kanau::processor::Processor;
 use newtype_record_id::table_record;
 use surrealdb_types::SurrealValue;
-use wakuwaku::surreal::SurrealProcessor;
 
 table_record!(ServerHealthRecordId, "server_health_record");
 
@@ -14,17 +17,18 @@ pub struct ServerHealthRecordEntity {
     pub server: ServerId,
     pub status: ServerHealthStatus,
     pub report_time: DateTime<Utc>,
-    pub upload_bytes: u64,
-    pub download_bytes: u64,
-    pub max_connection_number: u64,
+    pub upload_bytes: i64,
+    pub download_bytes: i64,
+    pub max_connection_number: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, SurrealValue)]
+#[surreal(untagged, rename_all = "snake_case")]
 pub enum ServerHealthStatus {
     /// The server is online and healthy.
     Online,
     /// The server failed to apply the latest configuration changes.
-    Downgraded,
+    Degraded,
     /// The server is offline or can't connect to the master node.
     Offline,
 }
@@ -35,19 +39,11 @@ pub struct ListServerHealthHistory {
     pub end: DateTime<Utc>,
 }
 
-impl Processor<ListServerHealthHistory> for SurrealProcessor {
-    type Output = Vec<ServerHealthRecordEntity>;
-    type Error = surrealdb::Error;
-    async fn process(&self, input: ListServerHealthHistory) -> Result<Self::Output, Self::Error> {
-        todo!()
-    }
-}
-
-table_record!(NodeHealthyRecordId, "node_health_record");
+table_record!(NodeHealthRecordId, "node_health_record");
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct NodeHealthRecordEntity {
-    pub id: NodeHealthyRecordId,
+    pub id: NodeHealthRecordId,
     pub node: NodeId,
     pub status: NodeHealthStatus,
     pub message: String,
@@ -55,6 +51,7 @@ pub struct NodeHealthRecordEntity {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
+#[surreal(untagged, rename_all = "snake_case")]
 pub enum NodeHealthStatus {
     /// The node setting is applied to the server, and the node is healthy
     Ready,
@@ -68,14 +65,6 @@ pub enum NodeHealthStatus {
 
 pub struct ListNodeHealthHistory {
     pub node: NodeId,
-    pub limit: u64,
-    pub offset: u64,
-}
-
-impl Processor<ListNodeHealthHistory> for SurrealProcessor {
-    type Output = Vec<NodeHealthRecordEntity>;
-    type Error = surrealdb::Error;
-    async fn process(&self, input: ListNodeHealthHistory) -> Result<Self::Output, Self::Error> {
-        todo!()
-    }
+    pub limit: i64,
+    pub offset: i64,
 }
