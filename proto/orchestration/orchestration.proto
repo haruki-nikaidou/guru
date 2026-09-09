@@ -128,7 +128,6 @@ message Port {
   string key = 5;
   int64 position = 6;
 }
-// `retiring` is true while the row is retired but not yet garbage-collected.
 message Node {
   string id = 1;
   string canvas_id = 2;
@@ -136,19 +135,12 @@ message Node {
   string comment = 4;
   NodeSpec spec = 5;
   CanvasUiPosition position = 6;
-  int64 created_rev = 7;
-  int64 retired_rev = 8;
-  bool retiring = 9;
-  string replaces_id = 10;
-  repeated Port ports = 11;
+  repeated Port ports = 7;
 }
 message Edge {
   string id = 1;
   string source_port_id = 2;
   string target_port_id = 3;
-  int64 created_rev = 4;
-  int64 retired_rev = 5;
-  bool retiring = 6;
 }
 message ServerIp {
   string id = 1;
@@ -165,11 +157,8 @@ message Server {
   CanvasUiPosition position = 6;
   Ipv6Resolve ipv6_resolve = 7;
   string log_level = 8;
-  int64 desired_revision = 9;
-  int64 applied_revision = 10;
-  string last_apply_error = 11;
-  string last_seen_at = 12;
-  repeated ServerIp ips = 13;
+  string last_seen_at = 9;
+  repeated ServerIp ips = 10;
 }
 message Canvas {
   string id = 1;
@@ -184,9 +173,21 @@ message Problem {
   repeated string edge_ids = 5;
   repeated string port_ids = 6;
 }
-message RetainedRevision {
+// A listener a server serves, or that another server points at.
+// `protocol` is one of `raw`, `relay_tcp`, `relay_tls`, `relay_quic`.
+message ListenerCap {
+  string ip = 1;
+  uint32 port = 2;
+  string protocol = 3;
+}
+message ForwardingDeps {
+  ListenerCap serves = 1;
+  repeated ListenerCap points_at = 2;
+}
+message ConfigSnapshot {
   int64 revision = 1;
   string created_at = 2;
+  repeated ForwardingDeps forwardings = 3;
 }
 
 message CreateCanvasRequest {
@@ -336,13 +337,24 @@ message GetServerConfigReply {
 message GetServerRolloutStatusRequest {
   string server_id = 1;
 }
+// `waiting_for_server_ids` are servers whose applied config does not yet serve a
+// listener this server's ideal config points at.
 message GetServerRolloutStatusReply {
-  int64 desired_revision = 1;
-  int64 applied_revision = 2;
-  string last_apply_error = 3;
-  string last_seen_at = 4;
-  repeated RetainedRevision retained = 5;
+  ConfigSnapshot desired = 1;
+  ConfigSnapshot in_flight = 2;
+  ConfigSnapshot applied = 3;
+  string apply_error = 4;
+  string derive_error = 5;
+  repeated string waiting_for_server_ids = 6;
+  bool derivation_pending = 7;
+  string last_seen_at = 8;
 }
+// Admin only: declares a server dead, which lets its dependants switch away from
+// listeners it may in fact still be serving.
+message ForgetServerAppliedRequest {
+  string server_id = 1;
+}
+message ForgetServerAppliedReply {}
 
 service Orchestration {
   rpc CreateCanvas(CreateCanvasRequest) returns (CreateCanvasReply);
@@ -369,4 +381,5 @@ service Orchestration {
   rpc ForceDisconnect(ForceDisconnectRequest) returns (ForceDisconnectReply);
   rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigReply);
   rpc GetServerRolloutStatus(GetServerRolloutStatusRequest) returns (GetServerRolloutStatusReply);
+  rpc ForgetServerApplied(ForgetServerAppliedRequest) returns (ForgetServerAppliedReply);
 }

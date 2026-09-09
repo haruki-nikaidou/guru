@@ -17,9 +17,6 @@ pub struct ServerEntity {
     pub position: CanvasUiPosition,
     pub ipv6_resolve: ServerIpv6Resolve,
     pub log_level: String,
-    pub desired_revision: i64,
-    pub applied_revision: i64,
-    pub last_apply_error: Option<String>,
     pub current_dynamic_refresh_key: Option<String>,
     pub refresh_key_generation: i64,
     /// Monotonic claim counter for the single live `WatchConfig` stream. Bumped by
@@ -83,20 +80,14 @@ pub struct CreateServer {
 impl Processor<CreateServer> for SurrealProcessor {
     type Output = ServerEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:CreateServer", skip_all, err, fields(canvas = ?input.canvas))]
+    #[tracing::instrument(name = "Query-Transaction:CreateServer", skip_all, err, fields(canvas = ?input.canvas))]
     async fn process(&self, input: CreateServer) -> Result<Self::Output, Self::Error> {
+        // The server and its (empty) config view are one write: no code path may
+        // ever observe a server without the row its rollout is tracked in.
+        // Statement 0 is BEGIN; the RETURN below is statement 4.
         let mut resp = self
             .db()
-            .query(
-                "CREATE ONLY orchestration_server CONTENT {
-                     canvas: $canvas, name: $name, icon: $icon, comment: $comment,
-                     position: $position, ipv6_resolve: $ipv6_resolve, log_level: $log_level,
-                     desired_revision: 0, applied_revision: 0, last_apply_error: NONE,
-                     current_dynamic_refresh_key: NONE, refresh_key_generation: 0, watch_epoch: 0,
-                     session_lease_until: NONE,
-                     last_seen_at: NONE
-                 }",
-            )
+            .query(include_str!("../../../sql/server/create_server.surql"))
             .bind(("canvas", input.canvas))
             .bind(("name", input.name))
             .bind(("icon", input.icon))
@@ -105,7 +96,7 @@ impl Processor<CreateServer> for SurrealProcessor {
             .bind(("ipv6_resolve", input.ipv6_resolve))
             .bind(("log_level", input.log_level))
             .await?;
-        resp.take::<Option<ServerEntity>>(0)?
+        resp.take::<Option<ServerEntity>>(4)?
             .ok_or_else(|| surrealdb::Error::internal("create server returned no row".to_string()))
     }
 }
@@ -150,6 +141,7 @@ impl Processor<ListServersByCanvas> for SurrealProcessor {
 
 pub struct UpdateServerSettings {
     pub id: ServerId,
+    pub canvas: CanvasId,
     pub name: String,
     pub icon: String,
     pub comment: String,
@@ -160,22 +152,27 @@ pub struct UpdateServerSettings {
 impl Processor<UpdateServerSettings> for SurrealProcessor {
     type Output = ServerEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:UpdateServerSettings", skip_all, err, fields(id = ?input.id))]
+    #[tracing::instrument(name = "Query-Transaction:UpdateServerSettings", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: UpdateServerSettings) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the update is statement 1.
         let mut resp = self
             .db()
             .query(
-                "UPDATE $id SET name = $name, icon = $icon, comment = $comment,
-                     ipv6_resolve = $ipv6_resolve, log_level = $log_level RETURN AFTER",
+                "BEGIN TRANSACTION;
+                 UPDATE $id SET name = $name, icon = $icon, comment = $comment,
+                     ipv6_resolve = $ipv6_resolve, log_level = $log_level RETURN AFTER;
+                 UPDATE $canvas SET generation += 1;
+                 COMMIT TRANSACTION;",
             )
             .bind(("id", input.id))
+            .bind(("canvas", input.canvas))
             .bind(("name", input.name))
             .bind(("icon", input.icon))
             .bind(("comment", input.comment))
             .bind(("ipv6_resolve", input.ipv6_resolve))
             .bind(("log_level", input.log_level))
             .await?;
-        resp.take::<Option<ServerEntity>>(0)?
+        resp.take::<Option<ServerEntity>>(1)?
             .ok_or_else(|| surrealdb::Error::internal("server not found".to_string()))
     }
 }
@@ -203,6 +200,7 @@ impl Processor<MoveServerPosition> for SurrealProcessor {
 #[derive(Debug)]
 pub struct DeleteServerRow {
     pub id: ServerId,
+    pub canvas: CanvasId,
 }
 
 impl Processor<DeleteServerRow> for SurrealProcessor {
@@ -213,6 +211,7 @@ impl Processor<DeleteServerRow> for SurrealProcessor {
         self.db()
             .query(include_str!("../../../sql/server/delete_server_row.surql"))
             .bind(("id", input.id))
+            .bind(("canvas", input.canvas))
             .await?
             .check()?;
         Ok(())
@@ -287,23 +286,36 @@ impl Processor<ListServerIpsByCanvas> for SurrealProcessor {
 #[derive(Debug)]
 pub struct DeleteServerIpRow {
     pub id: ServerIpRecordId,
+    pub canvas: CanvasId,
 }
 
 impl Processor<DeleteServerIpRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:DeleteServerIpRow", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:DeleteServerIpRow", skip(self), err)]
     async fn process(&self, input: DeleteServerIpRow) -> Result<Self::Output, Self::Error> {
         self.db()
-            .query("DELETE $id")
+            .query(
+                "BEGIN TRANSACTION;
+                 DELETE $id;
+                 UPDATE $canvas SET generation += 1;
+                 COMMIT TRANSACTION;",
+            )
             .bind(("id", input.id))
+            .bind(("canvas", input.canvas))
             .await?
             .check()?;
         Ok(())
     }
 }
 
-/// Rotates the stored refresh-key digest and takes the server's session lease.
+/// Takes the server's session lease and reconciles what the worker reports.
+///
+/// Registration is the one moment the master learns exactly what a worker runs, so
+/// it is also where the config view is repaired: a running revision that matches
+/// `desired` or `in_flight` is promoted to `applied`, and whatever was left in
+/// flight is cleared — the worker is not running it, so it was lost with the
+/// session that sent it.
 ///
 /// The rotation is refused while another worker session is still alive, so a
 /// second worker configured with the same `server_id` cannot steal a running
@@ -311,35 +323,37 @@ impl Processor<DeleteServerIpRow> for SurrealProcessor {
 /// therefore only possible once the lease lapses (the incumbent crashed) or is
 /// released (the incumbent's stream ended).
 #[derive(Debug)]
-pub struct RotateServerRefreshKey {
+pub struct RegisterWorkerSession {
     pub server: ServerId,
+    pub canvas: CanvasId,
     pub digest: String,
     pub now: DateTime<Utc>,
     /// The lease deadline the new session gets.
     pub lease_until: DateTime<Utc>,
+    /// The revision the worker says it is running; `0` for a fresh worker.
+    pub running_revision: i64,
 }
 
-impl Processor<RotateServerRefreshKey> for SurrealProcessor {
+impl Processor<RegisterWorkerSession> for SurrealProcessor {
     /// The rotated row, or `None` when a live session still holds the server.
     type Output = Option<ServerEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:RotateServerRefreshKey", skip_all, err, fields(server = ?input.server))]
-    async fn process(&self, input: RotateServerRefreshKey) -> Result<Self::Output, Self::Error> {
+    #[tracing::instrument(name = "Query-Transaction:RegisterWorkerSession", skip_all, err, fields(server = ?input.server))]
+    async fn process(&self, input: RegisterWorkerSession) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
             .db()
-            .query(
-                "UPDATE $server SET current_dynamic_refresh_key = $digest,
-                     refresh_key_generation += 1, session_lease_until = $lease_until,
-                     last_seen_at = $now
-                 WHERE session_lease_until = NONE OR session_lease_until <= $now
-                 RETURN AFTER",
-            )
+            .query(include_str!(
+                "../../../sql/server/register_worker_session.surql"
+            ))
             .bind(("server", input.server))
+            .bind(("canvas", input.canvas))
             .bind(("digest", input.digest))
             .bind(("now", input.now))
             .bind(("lease_until", input.lease_until))
+            .bind(("running_revision", input.running_revision))
             .await?;
-        Ok(resp.take::<Vec<ServerEntity>>(0)?.into_iter().next())
+        resp.take::<Option<ServerEntity>>(3)
     }
 }
 
@@ -350,6 +364,12 @@ impl Processor<RotateServerRefreshKey> for SurrealProcessor {
 /// it bumps `watch_epoch`, so `(refresh_key_generation, watch_epoch)` totally
 /// orders every session a server ever had. That ordering is the fence: a stream is
 /// authoritative exactly while the row still carries the pair it won.
+///
+/// Claiming also voids whatever the previous stream had in flight. `in_flight`
+/// means "handed to the live session and not yet acknowledged", and the session it
+/// was handed to is precisely what this claim just fenced out: nobody is left to
+/// acknowledge it, so leaving it set would strand the revision until the next
+/// unrelated edit.
 #[derive(Debug)]
 pub struct ClaimServerWatchSession {
     pub server: ServerId,
@@ -363,21 +383,20 @@ impl Processor<ClaimServerWatchSession> for SurrealProcessor {
     /// The claimed row, or `None` when the generation is no longer current.
     type Output = Option<ServerEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ClaimServerWatchSession", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:ClaimServerWatchSession", skip(self), err)]
     async fn process(&self, input: ClaimServerWatchSession) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
             .db()
-            .query(
-                "UPDATE $server SET watch_epoch += 1, session_lease_until = $lease_until,
-                     last_seen_at = $now
-                 WHERE refresh_key_generation = $generation RETURN AFTER",
-            )
+            .query(include_str!(
+                "../../../sql/server/claim_watch_session.surql"
+            ))
             .bind(("server", input.server))
             .bind(("generation", input.generation))
             .bind(("now", input.now))
             .bind(("lease_until", input.lease_until))
             .await?;
-        Ok(resp.take::<Vec<ServerEntity>>(0)?.into_iter().next())
+        resp.take::<Option<ServerEntity>>(3)
     }
 }
 
@@ -462,96 +481,5 @@ impl Processor<FindServerByRefreshKeyDigest> for SurrealProcessor {
             .bind(("digest", input.digest))
             .await?;
         resp.take::<Option<ServerEntity>>(0)
-    }
-}
-
-#[derive(Debug)]
-pub struct SetServerDesiredRevision {
-    pub server: ServerId,
-    pub revision: i64,
-}
-
-impl Processor<SetServerDesiredRevision> for SurrealProcessor {
-    type Output = ();
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:SetServerDesiredRevision", skip(self), err)]
-    async fn process(&self, input: SetServerDesiredRevision) -> Result<Self::Output, Self::Error> {
-        self.db()
-            .query("UPDATE $server SET desired_revision = $revision, last_apply_error = NONE")
-            .bind(("server", input.server))
-            .bind(("revision", input.revision))
-            .await?
-            .check()?;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct MarkServerApplied {
-    pub server: ServerId,
-    pub revision: i64,
-}
-
-impl Processor<MarkServerApplied> for SurrealProcessor {
-    type Output = ();
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:MarkServerApplied", skip(self), err)]
-    async fn process(&self, input: MarkServerApplied) -> Result<Self::Output, Self::Error> {
-        self.db()
-            .query("UPDATE $server SET applied_revision = $revision, last_apply_error = NONE")
-            .bind(("server", input.server))
-            .bind(("revision", input.revision))
-            .await?
-            .check()?;
-        Ok(())
-    }
-}
-
-pub struct SetServerApplyError {
-    pub server: ServerId,
-    pub error: String,
-}
-
-impl Processor<SetServerApplyError> for SurrealProcessor {
-    type Output = ();
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:SetServerApplyError", skip_all, err, fields(server = ?input.server))]
-    async fn process(&self, input: SetServerApplyError) -> Result<Self::Output, Self::Error> {
-        self.db()
-            .query("UPDATE $server SET last_apply_error = $error")
-            .bind(("server", input.server))
-            .bind(("error", input.error))
-            .await?
-            .check()?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, SurrealValue)]
-pub struct ServerWatchState {
-    pub id: ServerId,
-    pub desired_revision: i64,
-    pub refresh_key_generation: i64,
-    pub watch_epoch: i64,
-}
-
-pub struct ListServerWatchState {
-    pub servers: Vec<ServerId>,
-}
-
-impl Processor<ListServerWatchState> for SurrealProcessor {
-    type Output = Vec<ServerWatchState>;
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListServerWatchState", skip_all, err)]
-    async fn process(&self, input: ListServerWatchState) -> Result<Self::Output, Self::Error> {
-        let mut resp = self
-            .db()
-            .query(
-                "SELECT id, desired_revision, refresh_key_generation, watch_epoch
-                 FROM orchestration_server WHERE id IN $servers",
-            )
-            .bind(("servers", input.servers))
-            .await?;
-        resp.take::<Vec<ServerWatchState>>(0)
     }
 }

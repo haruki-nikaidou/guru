@@ -1,81 +1,52 @@
-//! Re-derivation and rollout status.
+//! Rollout status, config reads, and the dirty-canvas notifier.
 
-use crate::entities::surreal::canvas::CanvasId;
-use crate::entities::surreal::revision::{
-    FindServerConfigRevision, ListRetainedRevisions, RecordServerConfigRevision,
-    ServerConfigRevisionEntity,
+use crate::entities::surreal::canvas::{CanvasId, FindCanvasById};
+use crate::entities::surreal::server::{FindServerById, ServerId};
+use crate::entities::surreal::topology::FindCanvasOfServer;
+use crate::entities::surreal::view::{
+    ConfigSnapshot, FindServerConfigView, ForgetServerAppliedRow,
 };
-use crate::entities::surreal::server::{
-    FindServerById, ServerId, SetServerApplyError, SetServerDesiredRevision,
-};
-use crate::entities::surreal::topology::{FindCanvasOfServer, LoadCanvasTopology};
+use crate::events::CanvasDirty;
 use crate::services::OrchestrationError;
-use crate::services::derive::derive_server_config;
+use crate::utils::ids::record_key;
+use auth::entities::surreal::account::AccountRole;
 use auth::services::identity::Identity;
 use auth::utils::rbac::Permission;
 use chrono::{DateTime, Utc};
 use kanau::processor::Processor;
+use wakuwaku::amqp::{AmqpMessageSend, AmqpPool};
 use wakuwaku::surreal::SurrealProcessor;
 
-/// Re-derives every server of a canvas after a committed change.
+/// Tells the derivation hook that a canvas has pending edits.
 ///
-/// A server whose derived TOML is byte-identical to the text it is already rolling
-/// out gets no new revision row, so unrelated servers never pin retired rows and
-/// never restart their listeners. A server whose config cannot be derived records
-/// the reason and keeps its current desired revision, so one unsupported node does
-/// not block the rest of the canvas.
-pub(crate) async fn stamp_canvas(
-    db: &SurrealProcessor,
-    canvas: &CanvasId,
-    revision: i64,
-) -> Result<(), OrchestrationError> {
-    let topology = db
-        .process(LoadCanvasTopology {
-            canvas: canvas.clone(),
-        })
-        .await?;
-    for server in &topology.servers {
-        match derive_server_config(&topology, &server.id) {
-            Ok(derived) => {
-                let current = db
-                    .process(FindServerConfigRevision {
-                        server: server.id.clone(),
-                        revision: server.desired_revision,
-                    })
-                    .await?;
-                if current.map(|row| row.toml) == Some(derived.toml.clone()) {
-                    continue;
-                }
-                db.process(RecordServerConfigRevision {
-                    server: server.id.clone(),
-                    revision,
-                    nodes: derived.nodes,
-                    edges: derived.edges,
-                    toml: derived.toml,
-                })
-                .await?;
-                db.process(SetServerDesiredRevision {
-                    server: server.id.clone(),
-                    revision,
-                })
-                .await?;
-            }
-            Err(e) => {
-                tracing::warn!(server = %server.name, error = %e, "config derivation failed");
-                db.process(SetServerApplyError {
-                    server: server.id.clone(),
-                    error: format!("derive: {e}"),
-                })
-                .await?;
-            }
+/// The notification is pure latency optimisation: the write that precedes it has
+/// already bumped the canvas generation, and the cron sweep re-derives anything
+/// whose generation ran ahead of its derivation. A publish failure is therefore
+/// logged and swallowed rather than failing the operator's edit, and a deployment
+/// with no broker at all (`amqp: None`) still converges on the sweep.
+#[derive(Clone, Default)]
+pub struct DirtyNotifier {
+    pub amqp: Option<AmqpPool>,
+}
+
+impl DirtyNotifier {
+    pub async fn notify(&self, canvas: &CanvasId) {
+        let Some(pool) = &self.amqp else {
+            return;
+        };
+        let event = CanvasDirty {
+            canvas: record_key(&canvas.0),
+        };
+        if let Err(e) = event.send(pool).await {
+            tracing::warn!(error = %e, "publishing canvas_dirty failed; the sweep will catch up");
         }
     }
-    Ok(())
 }
 
 #[derive(Clone)]
 pub struct RolloutService {
     pub db: SurrealProcessor,
+    pub notifier: DirtyNotifier,
 }
 
 pub struct GetServerConfig {
@@ -84,36 +55,37 @@ pub struct GetServerConfig {
 }
 
 impl Processor<GetServerConfig> for RolloutService {
+    /// The desired revision and its TOML; `(0, "")` before the first derivation.
     type Output = (i64, String);
     type Error = OrchestrationError;
     #[tracing::instrument(name = "Service:GetServerConfig", skip_all, err)]
     async fn process(&self, input: GetServerConfig) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ViewWorkspace)?;
-        let server = self
+        let view = self
             .db
-            .process(FindServerById {
-                id: input.server.clone(),
+            .process(FindServerConfigView {
+                server: input.server,
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-        let topology = self
-            .db
-            .process(LoadCanvasTopology {
-                canvas: server.canvas.clone(),
-            })
-            .await?;
-        let derived = derive_server_config(&topology, &server.id)?;
-        Ok((server.desired_revision, derived.toml))
+        Ok(match view.desired {
+            Some(snapshot) => (snapshot.revision, snapshot.toml),
+            None => (0, String::new()),
+        })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct RolloutStatus {
-    pub desired_revision: i64,
-    pub applied_revision: i64,
-    pub last_apply_error: Option<String>,
+    pub desired: Option<ConfigSnapshot>,
+    pub in_flight: Option<ConfigSnapshot>,
+    pub applied: Option<ConfigSnapshot>,
+    pub apply_error: Option<String>,
+    pub derive_error: Option<String>,
+    pub waiting_for: Vec<ServerId>,
+    /// The canvas has edits the derivation has not caught up with yet.
+    pub derivation_pending: bool,
     pub last_seen_at: Option<DateTime<Utc>>,
-    pub retained: Vec<ServerConfigRevisionEntity>,
 }
 
 pub struct GetServerRolloutStatus {
@@ -134,19 +106,68 @@ impl Processor<GetServerRolloutStatus> for RolloutService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-        let retained = self
+        let view = self
             .db
-            .process(ListRetainedRevisions {
-                server: server.id.clone(),
+            .process(FindServerConfigView {
+                server: input.server,
+            })
+            .await?
+            .ok_or(OrchestrationError::NotFound)?;
+        let canvas = self
+            .db
+            .process(FindCanvasById {
+                id: server.canvas.clone(),
+            })
+            .await?
+            .ok_or(OrchestrationError::NotFound)?;
+        Ok(RolloutStatus {
+            desired: view.desired,
+            in_flight: view.in_flight,
+            applied: view.applied,
+            apply_error: view.apply_error,
+            derive_error: view.derive_error,
+            waiting_for: view.waiting_for,
+            derivation_pending: canvas.generation > canvas.derived_generation,
+            last_seen_at: server.last_seen_at,
+        })
+    }
+}
+
+/// Forgets what a server was running, so its dependants stop waiting for it.
+///
+/// The only way out when a server is gone for good: convergence refuses to move a
+/// listener that a live `applied` snapshot still points at, and a dead worker
+/// never acks. Clearing its slots is an operator asserting "this one is not coming
+/// back".
+///
+/// Admin only, for the same reason as `ForceDeleteNode` and `ForceDisconnect`: the
+/// assertion is unverifiable, and if it is wrong about a server that is merely
+/// unreachable, convergence will switch its dependants off listeners that are
+/// still carrying traffic. This is the one operation that can break a live path
+/// without the topology checker ever objecting.
+pub struct ForgetServerApplied {
+    pub actor: Identity,
+    pub server: ServerId,
+}
+
+impl Processor<ForgetServerApplied> for RolloutService {
+    type Output = ();
+    type Error = OrchestrationError;
+    #[tracing::instrument(name = "Service:ForgetServerApplied", skip_all, err)]
+    async fn process(&self, input: ForgetServerApplied) -> Result<Self::Output, Self::Error> {
+        input.actor.ensure(Permission::EditWorkspace)?;
+        if input.actor.role != AccountRole::Admin {
+            return Err(OrchestrationError::PermissionDenied);
+        }
+        let canvas = canvas_of_server(&self.db, &input.server).await?;
+        self.db
+            .process(ForgetServerAppliedRow {
+                server: input.server,
+                canvas: canvas.clone(),
             })
             .await?;
-        Ok(RolloutStatus {
-            desired_revision: server.desired_revision,
-            applied_revision: server.applied_revision,
-            last_apply_error: server.last_apply_error,
-            last_seen_at: server.last_seen_at,
-            retained,
-        })
+        self.notifier.notify(&canvas).await;
+        Ok(())
     }
 }
 

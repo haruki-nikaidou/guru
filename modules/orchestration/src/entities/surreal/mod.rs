@@ -4,6 +4,6 @@ pub mod dns;
 pub mod health;
 pub mod node;
 pub mod port;
-pub mod revision;
 pub mod server;
 pub mod topology;
+pub mod view;

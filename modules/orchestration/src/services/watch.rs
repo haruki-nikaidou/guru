@@ -1,9 +1,10 @@
-//! Per-server signal hub plus a revision poller.
+//! Per-server signal hub plus a config-view poller.
 //!
 //! Mutations happen in the dashboard process while streams live in the worker-facing
 //! process, so an in-process broadcast alone can never observe a new revision. The
-//! poller closes that gap; when AMQP fan-out lands it replaces the poller without
-//! touching the hub or the stream handler.
+//! poller watches the config view; a stream reacts to any change by attempting a
+//! conditional send, so the database — not this process — decides what is sent and
+//! to whom.
 //!
 //! # One session per server
 //!
@@ -22,7 +23,7 @@
 //! The hub only mirrors that state so a fenced-out stream dies immediately instead
 //! of at the next poll. The database, not this process, is the source of truth.
 
-use crate::entities::surreal::server::{ListServerWatchState, ServerWatchState};
+use crate::entities::surreal::view::{ListServerWatchState, ServerWatchState};
 use crate::utils::ids::record_key;
 use kanau::processor::Processor;
 use std::collections::HashMap;
@@ -79,16 +80,21 @@ pub struct WatchFence {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSignal {
-    Revision(i64),
+    /// Something about this server's config view changed; try to take a snapshot.
+    Changed,
     /// The authoritative session moved on; every stream whose fence differs from
     /// the carried one must end.
     Fenced(WatchFence),
 }
 
+/// `(desired, in_flight, failed)` revisions: the whole observable state of a view
+/// as far as a stream is concerned.
+type ViewState = (Option<i64>, Option<i64>, Option<i64>);
+
 struct Entry {
     tx: broadcast::Sender<AgentSignal>,
     subscribers: usize,
-    last_revision: i64,
+    last: Option<ViewState>,
     fence: WatchFence,
 }
 
@@ -99,10 +105,6 @@ pub struct WatchHub {
 
 pub struct WatchSubscription {
     pub rx: broadcast::Receiver<AgentSignal>,
-    /// The newest revision the hub knows about, which can be ahead of the row the
-    /// subscriber read: a poll that landed between that read and this subscription
-    /// has already been broadcast and would otherwise never be repeated.
-    pub last_revision: i64,
     server_key: String,
     entries: Arc<Mutex<HashMap<String, Entry>>>,
 }
@@ -131,12 +133,7 @@ impl WatchHub {
     /// Returns `None` when `fence` is already outranked — a claim that lost a race
     /// against a newer registration or a newer stream must never pull the hub's
     /// fence backwards, or it would resurrect a session the database has retired.
-    pub fn subscribe(
-        &self,
-        server_key: &str,
-        fence: WatchFence,
-        last_revision: i64,
-    ) -> Option<WatchSubscription> {
+    pub fn subscribe(&self, server_key: &str, fence: WatchFence) -> Option<WatchSubscription> {
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
@@ -146,7 +143,7 @@ impl WatchHub {
             Entry {
                 tx,
                 subscribers: 0,
-                last_revision,
+                last: None,
                 fence,
             }
         });
@@ -159,13 +156,10 @@ impl WatchHub {
             let _ = entry.tx.send(AgentSignal::Fenced(fence));
         }
         entry.subscribers = entry.subscribers.saturating_add(1);
-        entry.last_revision = entry.last_revision.max(last_revision);
-        let last_revision = entry.last_revision;
         let rx = entry.tx.subscribe();
         drop(entries);
         Some(WatchSubscription {
             rx,
-            last_revision,
             server_key: server_key.to_string(),
             entries: self.entries.clone(),
         })
@@ -232,14 +226,22 @@ impl WatchHub {
             let _ = entry.tx.send(AgentSignal::Fenced(fence));
             return;
         }
-        if state.desired_revision > entry.last_revision {
-            entry.last_revision = state.desired_revision;
-            let _ = entry.tx.send(AgentSignal::Revision(state.desired_revision));
+        // The hub does not decide what is sendable — it only says "look again".
+        // Whether anything is actually handed over is one conditional update in
+        // the database, so a spurious wake costs a query and never a wrong send.
+        let observed = (
+            state.desired_revision,
+            state.in_flight_revision,
+            state.failed_revision,
+        );
+        if entry.last != Some(observed) {
+            entry.last = Some(observed);
+            let _ = entry.tx.send(AgentSignal::Changed);
         }
     }
 }
 
-/// Polls the desired revision of every watched server until `shutdown`.
+/// Polls the config view of every watched server until `shutdown`.
 pub async fn run_poller(
     hub: WatchHub,
     db: SurrealProcessor,
@@ -277,9 +279,11 @@ mod tests {
     fn state(key: &str, desired: i64, fence: WatchFence) -> ServerWatchState {
         ServerWatchState {
             id: crate::utils::ids::server_id(key),
-            desired_revision: desired,
             refresh_key_generation: fence.generation,
             watch_epoch: fence.epoch,
+            desired_revision: Some(desired),
+            in_flight_revision: None,
+            failed_revision: None,
         }
     }
 
@@ -288,23 +292,11 @@ mod tests {
     }
 
     #[test]
-    fn a_new_session_inherits_a_revision_broadcast_before_it_subscribed() {
-        let hub = WatchHub::default();
-        let first = hub.subscribe("s", fence(1, 1), 5).unwrap();
-        hub.publish(&state("s", 7, fence(1, 1)));
-        // The row this session claimed can predate that poll; without inheriting the
-        // hub's revision it would sit on 5 until the next unrelated edit.
-        let second = hub.subscribe("s", fence(1, 2), 5).unwrap();
-        assert_eq!(second.last_revision, 7);
-        drop(first);
-    }
-
-    #[test]
     fn an_outranked_claim_is_refused_and_leaves_the_fence_alone() {
         let hub = WatchHub::default();
-        let mut live = hub.subscribe("s", fence(2, 3), 0).unwrap();
-        assert!(hub.subscribe("s", fence(2, 2), 0).is_none());
-        assert!(hub.subscribe("s", fence(1, 9), 0).is_none());
+        let mut live = hub.subscribe("s", fence(2, 3)).unwrap();
+        assert!(hub.subscribe("s", fence(2, 2)).is_none());
+        assert!(hub.subscribe("s", fence(1, 9)).is_none());
         // The live session was never told to go away.
         assert!(matches!(
             live.rx.try_recv(),
@@ -315,8 +307,8 @@ mod tests {
     #[test]
     fn a_newer_fence_ends_the_session_it_replaces() {
         let hub = WatchHub::default();
-        let mut first = hub.subscribe("s", fence(1, 1), 0).unwrap();
-        let _second = hub.subscribe("s", fence(1, 2), 0).unwrap();
+        let mut first = hub.subscribe("s", fence(1, 1)).unwrap();
+        let _second = hub.subscribe("s", fence(1, 2)).unwrap();
         assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Fenced(fence(1, 2))));
 
         // A registration in this process, and a poll that saw one elsewhere.
@@ -324,28 +316,43 @@ mod tests {
         assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Fenced(fence(2, 0))));
         hub.publish(&state("s", 3, fence(2, 1)));
         assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Fenced(fence(2, 1))));
-        // The fence advance is the whole message: revisions belong to the session
-        // that now owns the server, and the next poll delivers them to it.
+        // The fence advance is the whole message: config belongs to the session
+        // that now owns the server, and the next poll wakes it.
         assert!(matches!(
             first.rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
         hub.publish(&state("s", 3, fence(2, 1)));
-        assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Revision(3)));
+        assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Changed));
     }
 
     #[test]
     fn a_stale_poll_is_ignored_entirely() {
         let hub = WatchHub::default();
-        let mut live = hub.subscribe("s", fence(3, 4), 0).unwrap();
-        // A snapshot from before this session was claimed: neither its fence nor its
-        // revision may be applied to the session that replaced it.
+        let mut live = hub.subscribe("s", fence(3, 4)).unwrap();
+        // A snapshot from before this session was claimed: neither its fence nor
+        // its state may be applied to the session that replaced it.
         hub.publish(&state("s", 9, fence(2, 8)));
         assert!(matches!(
             live.rx.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
         hub.publish(&state("s", 9, fence(3, 4)));
-        assert_eq!(live.rx.try_recv(), Ok(AgentSignal::Revision(9)));
+        assert_eq!(live.rx.try_recv(), Ok(AgentSignal::Changed));
+    }
+
+    #[test]
+    fn a_repeated_poll_with_the_same_state_is_not_rebroadcast() {
+        let hub = WatchHub::default();
+        let mut live = hub.subscribe("s", fence(1, 1)).unwrap();
+        hub.publish(&state("s", 4, fence(1, 1)));
+        hub.publish(&state("s", 4, fence(1, 1)));
+        assert_eq!(live.rx.try_recv(), Ok(AgentSignal::Changed));
+        // Waking a stream once per tick would have it re-query the database every
+        // poll interval for as long as anything is undeliverable.
+        assert!(matches!(
+            live.rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

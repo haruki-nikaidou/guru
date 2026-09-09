@@ -2,13 +2,15 @@
 
 use crate::entities::surreal::canvas::{CanvasId, CanvasUiPosition, FindCanvasById};
 use crate::entities::surreal::node::NodeSpec;
-use crate::entities::surreal::revision::NextRevision;
 use crate::entities::surreal::server::{
     CreateServer as CreateServerRow, CreateServerIp, DeleteServerIpRow, DeleteServerRow,
     FindServerById, FindServerIpById, MoveServerPosition, ServerEntity, ServerId,
     ServerIpRecordEntity, ServerIpRecordId, ServerIpv6Resolve, UpdateServerSettings,
 };
 use crate::entities::surreal::topology::LoadCanvasTopology;
+use crate::entities::surreal::view::ListServerConfigViewsByCanvas;
+use crate::services::converge::ensure_switch_safe;
+use crate::services::rollout::DirtyNotifier;
 use crate::services::topology::{TopologyEdit, ensure_valid};
 use crate::services::{OrchestrationError, rollout};
 use crate::utils::ids::record_key;
@@ -21,6 +23,7 @@ use wakuwaku::surreal::SurrealProcessor;
 #[derive(Clone)]
 pub struct ServerService {
     pub db: SurrealProcessor,
+    pub notifier: DirtyNotifier,
 }
 
 pub struct CreateServer {
@@ -51,6 +54,8 @@ impl Processor<CreateServer> for ServerService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
+        // The row and its config view are created in one transaction, so there is
+        // nothing to re-read and nothing to stamp here.
         let server = self
             .db
             .process(CreateServerRow {
@@ -63,13 +68,8 @@ impl Processor<CreateServer> for ServerService {
                 log_level: input.log_level,
             })
             .await?;
-        // A new server immediately gets its (possibly empty) config row.
-        let revision = self.db.process(NextRevision {}).await?;
-        rollout::stamp_canvas(&self.db, &input.canvas, revision).await?;
-        self.db
-            .process(FindServerById { id: server.id })
-            .await?
-            .ok_or(OrchestrationError::NotFound)
+        self.notifier.notify(&input.canvas).await;
+        Ok(server)
     }
 }
 
@@ -101,17 +101,25 @@ impl Processor<UpdateServer> for ServerService {
                 canvas: canvas.clone(),
             })
             .await?;
-        ensure_valid(&topology.project(&[TopologyEdit::SetServerSettings {
+        let projected = topology.project(&[TopologyEdit::SetServerSettings {
             server: input.server.clone(),
             ipv6_resolve: input.ipv6_resolve,
             log_level: input.log_level.clone(),
-        }]))?;
+        }]);
+        ensure_valid(&projected)?;
+        let views = self
+            .db
+            .process(ListServerConfigViewsByCanvas {
+                canvas: canvas.clone(),
+            })
+            .await?;
+        ensure_switch_safe(&projected, &views)?;
 
-        let revision = self.db.process(NextRevision {}).await?;
         let server = self
             .db
             .process(UpdateServerSettings {
                 id: input.server,
+                canvas: canvas.clone(),
                 name: input.name,
                 icon: input.icon,
                 comment: input.comment,
@@ -119,7 +127,7 @@ impl Processor<UpdateServer> for ServerService {
                 log_level: input.log_level,
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        self.notifier.notify(&canvas).await;
         Ok(server)
     }
 }
@@ -185,13 +193,13 @@ impl Processor<DeleteServer> for ServerService {
             ));
         }
 
-        let revision = self.db.process(NextRevision {}).await?;
         self.db
             .process(DeleteServerRow {
                 id: input.server.clone(),
+                canvas: canvas.clone(),
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        self.notifier.notify(&canvas).await;
         Ok(())
     }
 }
@@ -271,13 +279,13 @@ impl Processor<RemoveServerIp> for ServerService {
             ip: input.ip_record.clone(),
         }]))?;
 
-        let revision = self.db.process(NextRevision {}).await?;
         self.db
             .process(DeleteServerIpRow {
                 id: input.ip_record,
+                canvas: canvas.clone(),
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        self.notifier.notify(&canvas).await;
         Ok(())
     }
 }

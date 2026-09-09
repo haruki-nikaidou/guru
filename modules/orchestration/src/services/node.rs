@@ -1,16 +1,18 @@
-//! Node operations. Spec changes are RCU: the old row is retired, never mutated.
+//! Node operations. Specs and ports are edited in place; ports keep their identity
+//! across a spec change, so the edges attached to them survive it.
 
 use crate::entities::surreal::canvas::{CanvasId, CanvasUiPosition, FindCanvasById};
-use crate::entities::surreal::connection::EdgeConnectionEntity;
 use crate::entities::surreal::node::{
-    CarryEdge, CreateNodeRow, FindNodeById, FindNodeWithPorts, ForceDeleteNodeRow, NewPort,
-    NodeEntity, NodeId, NodeSpec, NodeWithPorts, ReplaceNodeRow, RetireNodeRow, UpdateNodeMetaRow,
+    CreateNodeRow, DeleteNodeRow, FindNodeById, FindNodeWithPorts, NewPort, NodeEntity, NodeId,
+    NodeSpec, NodeWithPorts, UpdateNodeMetaRow, UpdateNodeSpecRow,
 };
 use crate::entities::surreal::port::{PortDirection, PortEntity, PortKind};
-use crate::entities::surreal::revision::NextRevision;
 use crate::entities::surreal::topology::LoadCanvasTopology;
+use crate::entities::surreal::view::ListServerConfigViewsByCanvas;
+use crate::services::OrchestrationError;
+use crate::services::converge::ensure_switch_safe;
+use crate::services::rollout::DirtyNotifier;
 use crate::services::topology::{TopologyEdit, ensure_valid};
-use crate::services::{OrchestrationError, rollout};
 use crate::utils::ids;
 use crate::utils::ids::record_key;
 use auth::entities::surreal::account::AccountRole;
@@ -22,6 +24,7 @@ use wakuwaku::surreal::SurrealProcessor;
 #[derive(Clone)]
 pub struct NodeService {
     pub db: SurrealProcessor,
+    pub notifier: DirtyNotifier,
 }
 
 /// The port layout of a spec. This is the single source of truth for port keys and
@@ -127,7 +130,6 @@ fn pending_node(
     spec: &NodeSpec,
     position: CanvasUiPosition,
     ports: &[NewPort],
-    revision: i64,
 ) -> (NodeEntity, Vec<PortEntity>) {
     let node_id = ids::node_id("pending-node");
     let node = NodeEntity {
@@ -137,9 +139,6 @@ fn pending_node(
         comment: comment.to_string(),
         spec: spec.clone(),
         position,
-        created_rev: revision,
-        retired_rev: None,
-        replaces: None,
     };
     let ports = ports
         .iter()
@@ -193,14 +192,20 @@ impl Processor<CreateNode> for NodeService {
             &input.spec,
             input.position,
             &ports,
-            0,
         );
-        ensure_valid(&topology.project(&[TopologyEdit::AddNode {
+        let projected = topology.project(&[TopologyEdit::AddNode {
             node: Box::new(node),
             ports: port_rows,
-        }]))?;
+        }]);
+        ensure_valid(&projected)?;
+        let views = self
+            .db
+            .process(ListServerConfigViewsByCanvas {
+                canvas: input.canvas.clone(),
+            })
+            .await?;
+        ensure_switch_safe(&projected, &views)?;
 
-        let revision = self.db.process(NextRevision {}).await?;
         let created = self
             .db
             .process(CreateNodeRow {
@@ -209,12 +214,10 @@ impl Processor<CreateNode> for NodeService {
                 comment: input.comment,
                 spec: input.spec,
                 position: input.position,
-                created_rev: revision,
-                replaces: None,
                 ports,
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &input.canvas, revision).await?;
+        self.notifier.notify(&input.canvas).await;
         Ok(created)
     }
 }
@@ -239,9 +242,6 @@ impl Processor<ReplaceNodeSpec> for NodeService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-        if old.node.retired_rev.is_some() {
-            return Err(OrchestrationError::Conflict("node is retired".into()));
-        }
         if std::mem::discriminant(&old.node.spec) != std::mem::discriminant(&input.spec) {
             return Err(OrchestrationError::Invalid(
                 "spec kind cannot change; create a new node".into(),
@@ -257,92 +257,85 @@ impl Processor<ReplaceNodeSpec> for NodeService {
             })
             .await?;
 
-        // Edges on ports that survive the replacement are re-attached by key.
-        let old_ports: Vec<&PortEntity> = old.ports.iter().collect();
-        let mut carry = Vec::new();
+        // A port whose key survives keeps its row, and with it every edge attached
+        // to it. The projection mirrors that: kept keys reuse the existing port id,
+        // so the edges below re-attach to exactly the rows the write will keep.
+        let mut port_rows = Vec::with_capacity(ports.len());
+        for (i, port) in ports.iter().enumerate() {
+            let id = match old.ports.iter().find(|p| p.key == port.key) {
+                Some(existing) => existing.id.clone(),
+                None => ids::port_id(&format!("pending-port-{i}")),
+            };
+            port_rows.push(PortEntity {
+                id,
+                owner: old.node.id.clone(),
+                kind: port.kind,
+                direction: port.direction,
+                key: port.key.clone(),
+                position: port.position,
+            });
+        }
+        let kept: Vec<String> = port_rows.iter().map(|p| record_key(&p.id.0)).collect();
+        let mut carried = Vec::new();
         for edge in &topology.edges {
-            for (port, is_source) in [(&edge.source, true), (&edge.target, false)] {
-                let Some(old_port) = old_ports
+            for port in [&edge.source, &edge.target] {
+                let Some(old_port) = old
+                    .ports
                     .iter()
                     .find(|p| record_key(&p.id.0) == record_key(&port.0))
                 else {
                     continue;
                 };
-                if !ports.iter().any(|p| p.key == old_port.key) {
+                if !kept.contains(&record_key(&old_port.id.0)) {
                     return Err(OrchestrationError::Conflict(
                         "disconnect edges on removed ports first".into(),
                     ));
                 }
-                let other = if is_source {
-                    edge.target.clone()
-                } else {
-                    edge.source.clone()
-                };
-                carry.push(CarryEdge {
-                    old_edge: edge.id.clone(),
-                    new_port_key: old_port.key.clone(),
-                    other_port: other,
-                    new_port_is_source: is_source,
-                });
+                carried.push(edge.clone());
             }
         }
 
-        let (node, port_rows) = pending_node(
-            &canvas,
-            &old.node.name,
-            &old.node.comment,
-            &input.spec,
-            old.node.position,
-            &ports,
-            0,
-        );
+        let node = NodeEntity {
+            id: old.node.id.clone(),
+            canvas: canvas.clone(),
+            name: old.node.name.clone(),
+            comment: old.node.comment.clone(),
+            spec: input.spec.clone(),
+            position: old.node.position,
+        };
         let mut edits = vec![
             TopologyEdit::RetireNode {
                 node: input.node.clone(),
             },
             TopologyEdit::AddNode {
                 node: Box::new(node),
-                ports: port_rows.clone(),
+                ports: port_rows,
             },
         ];
-        for (i, entry) in carry.iter().enumerate() {
-            let Some(new_port) = port_rows.iter().find(|p| p.key == entry.new_port_key) else {
-                continue;
-            };
-            let (source, target) = if entry.new_port_is_source {
-                (new_port.id.clone(), entry.other_port.clone())
-            } else {
-                (entry.other_port.clone(), new_port.id.clone())
-            };
-            edits.push(TopologyEdit::AddEdge {
-                edge: EdgeConnectionEntity {
-                    id: ids::edge_id(&format!("pending-{i}")),
-                    source,
-                    target,
-                    created_rev: 0,
-                    retired_rev: None,
-                },
-            });
+        for edge in carried {
+            edits.push(TopologyEdit::AddEdge { edge });
         }
-        ensure_valid(&topology.project(&edits))?;
-
-        let revision = self.db.process(NextRevision {}).await?;
-        let replacement = self
+        let projected = topology.project(&edits);
+        ensure_valid(&projected)?;
+        let views = self
             .db
-            .process(ReplaceNodeRow {
-                old: input.node,
+            .process(ListServerConfigViewsByCanvas {
                 canvas: canvas.clone(),
-                name: old.node.name,
-                comment: old.node.comment,
-                spec: input.spec,
-                position: old.node.position,
-                revision,
-                ports,
-                carry,
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
-        Ok(replacement)
+        ensure_switch_safe(&projected, &views)?;
+
+        let updated = self
+            .db
+            .process(UpdateNodeSpecRow {
+                id: input.node,
+                canvas: canvas.clone(),
+                spec: input.spec,
+                ports,
+            })
+            .await?;
+        self.notifier.notify(&canvas).await;
+        Ok(updated)
     }
 }
 
@@ -379,6 +372,7 @@ impl Processor<UpdateNodeMeta> for NodeService {
     }
 }
 
+/// Deletes a node after checking the canvas still validates without it.
 pub struct RetireNode {
     pub actor: Identity,
     pub node: NodeId,
@@ -397,9 +391,6 @@ impl Processor<RetireNode> for NodeService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-        if node.retired_rev.is_some() {
-            return Err(OrchestrationError::Conflict("node is retired".into()));
-        }
         let canvas = node.canvas.clone();
         let topology = self
             .db
@@ -407,22 +398,30 @@ impl Processor<RetireNode> for NodeService {
                 canvas: canvas.clone(),
             })
             .await?;
-        ensure_valid(&topology.project(&[TopologyEdit::RetireNode {
+        let projected = topology.project(&[TopologyEdit::RetireNode {
             node: input.node.clone(),
-        }]))?;
-
-        let revision = self.db.process(NextRevision {}).await?;
-        self.db
-            .process(RetireNodeRow {
-                id: input.node,
-                revision,
+        }]);
+        ensure_valid(&projected)?;
+        let views = self
+            .db
+            .process(ListServerConfigViewsByCanvas {
+                canvas: canvas.clone(),
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        ensure_switch_safe(&projected, &views)?;
+
+        self.db
+            .process(DeleteNodeRow {
+                id: input.node,
+                canvas: canvas.clone(),
+            })
+            .await?;
+        self.notifier.notify(&canvas).await;
         Ok(())
     }
 }
 
+/// Deletes a node without validating the canvas it leaves behind. Admin only.
 pub struct ForceDeleteNode {
     pub actor: Identity,
     pub node: NodeId,
@@ -446,10 +445,12 @@ impl Processor<ForceDeleteNode> for NodeService {
             .ok_or(OrchestrationError::NotFound)?;
         let canvas = node.canvas.clone();
         self.db
-            .process(ForceDeleteNodeRow { id: input.node })
+            .process(DeleteNodeRow {
+                id: input.node,
+                canvas: canvas.clone(),
+            })
             .await?;
-        let revision = self.db.process(NextRevision {}).await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        self.notifier.notify(&canvas).await;
         Ok(())
     }
 }

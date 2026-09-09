@@ -129,9 +129,6 @@ impl Builder {
             position: CanvasUiPosition { x: 0, y: 0 },
             ipv6_resolve: ServerIpv6Resolve::Tolerated,
             log_level: "info".to_string(),
-            desired_revision: 0,
-            applied_revision: 0,
-            last_apply_error: None,
             current_dynamic_refresh_key: None,
             refresh_key_generation: 0,
             watch_epoch: 0,
@@ -183,9 +180,6 @@ impl Builder {
                 comment: String::new(),
                 spec,
                 position: CanvasUiPosition { x: 0, y: 0 },
-                created_rev: 1,
-                retired_rev: None,
-                replaces: None,
             },
             ports,
         });
@@ -199,8 +193,6 @@ impl Builder {
             id: id.clone(),
             source: ids::port_id(source),
             target: ids::port_id(target),
-            created_rev: 1,
-            retired_rev: None,
         });
         id
     }
@@ -216,8 +208,6 @@ impl Builder {
             id: id.clone(),
             source,
             target,
-            created_rev: 1,
-            retired_rev: None,
         });
         id
     }

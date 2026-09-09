@@ -1,16 +1,17 @@
-//! Config derivation: one server's `guru-worker` TOML from a canvas topology.
+//! Config derivation: one server's ideal `guru-worker` config from a canvas topology.
 //!
 //! Derivation is a pure function of a [`CanvasTopology`] snapshot, so the same input
-//! always produces byte-identical TOML — that is what lets the rollout skip servers
-//! whose config did not actually change.
+//! always produces byte-identical output — that is what lets a derivation pass skip
+//! servers whose config did not actually change. What a server may *safely* run
+//! right now is decided afterwards, in [`crate::services::converge`].
 
-use crate::entities::surreal::connection::EdgeConnectionId;
 use crate::entities::surreal::node::{
-    NodeId, NodeSpec, NodeWithPorts, RelayProtocol as EntityRelayProtocol,
+    NodeSpec, NodeWithPorts, RelayProtocol as EntityRelayProtocol,
 };
 use crate::entities::surreal::port::{PortDirection, PortEntity};
 use crate::entities::surreal::server::{ServerId, ServerIpRecordEntity};
 use crate::entities::surreal::topology::CanvasTopology;
+use crate::entities::surreal::view::{ForwardingDeps, ListenProtocol, ListenerCap};
 use crate::utils::ids::record_key;
 use guru_worker_config::{
     Config, Forwarding, ForwardingTo, ListenAs, LoadBalanceGroup, LogConfig, RelayHost,
@@ -48,14 +49,13 @@ pub enum DeriveError {
     Invalid(#[from] guru_worker_config::ConfigError),
 }
 
+/// A server's ideal config: what the canvas says it should serve, ignoring what
+/// the rest of the fabric is currently running.
 #[derive(Debug, Clone)]
 pub struct DerivedConfig {
     pub config: Config,
-    pub toml: String,
-    /// Node rows this config was derived from; they must outlive the config.
-    pub nodes: Vec<NodeId>,
-    /// Edge rows this config was derived from.
-    pub edges: Vec<EdgeConnectionId>,
+    /// Index-aligned with `config.forwardings`.
+    pub forwardings: Vec<ForwardingDeps>,
 }
 
 pub fn derive_server_config(
@@ -72,8 +72,8 @@ pub fn derive_server_config(
         })?;
 
     let index = DeriveIndex::build(topology);
-    let mut used = Used::default();
     let mut forwardings = Vec::new();
+    let mut deps = Vec::new();
 
     let mut pods: Vec<&NodeWithPorts> = topology
         .nodes
@@ -101,12 +101,10 @@ pub fn derive_server_config(
         ) else {
             continue;
         };
-        let (Some(listen_edge), Some(destination_edge)) =
-            (index.edge_on(listen_port), index.edge_on(destination_port))
-        else {
+        if index.edge_on(listen_port).is_none() || index.edge_on(destination_port).is_none() {
             // A pod with an unconnected port is reported as a warning and skipped.
             continue;
-        };
+        }
 
         let address: IpAddr = ip.ip.parse().map_err(|_| DeriveError::InvalidIp {
             ip: record_key(&ip.id.0),
@@ -118,18 +116,26 @@ pub fn derive_server_config(
             .ok_or_else(|| DeriveError::UnsupportedSpec {
                 node: pod.node.name.clone(),
             })?;
-        let (listen_as, receive_proxy_protocol) = match &consumer.node.spec {
+        let (listen_as, listen_protocol, receive_proxy_protocol) = match &consumer.node.spec {
             NodeSpec::Entry(entry) => {
                 if entry.tls.is_some() {
                     return Err(DeriveError::TlsNotYetSupported {
                         node: consumer.node.name.clone(),
                     });
                 }
-                (ListenAs::Raw, entry.receive_proxy_protocol.map(Into::into))
+                (
+                    ListenAs::Raw,
+                    ListenProtocol::Raw,
+                    entry.receive_proxy_protocol.map(Into::into),
+                )
             }
             NodeSpec::Relay(relay) => match relay.protocol {
                 // The worker auto-detects PROXY on relay ingest.
-                EntityRelayProtocol::TcpRaw => (ListenAs::Relay(RelayHost::Tcp), None),
+                EntityRelayProtocol::TcpRaw => (
+                    ListenAs::Relay(RelayHost::Tcp),
+                    ListenProtocol::RelayTcp,
+                    None,
+                ),
                 other => {
                     return Err(DeriveError::RelayProtocolNotYetSupported {
                         node: consumer.node.name.clone(),
@@ -143,10 +149,6 @@ pub fn derive_server_config(
                 });
             }
         };
-        used.node(&pod.node.id);
-        used.node(&consumer.node.id);
-        used.edge(&listen_edge.id);
-        used.edge(&destination_edge.id);
 
         let producer =
             index
@@ -155,7 +157,8 @@ pub fn derive_server_config(
                     node: pod.node.name.clone(),
                 })?;
         let mut visited = Vec::new();
-        let to = derive_destination(&index, producer, &mut visited, &mut used)?;
+        let mut points_at = Vec::new();
+        let to = derive_destination(&index, producer, &mut visited, &mut points_at)?;
 
         forwardings.push(Forwarding {
             tag: pod.node.name.clone(),
@@ -163,6 +166,14 @@ pub fn derive_server_config(
             receive_proxy_protocol,
             listen_as,
             to,
+        });
+        deps.push(ForwardingDeps {
+            serves: ListenerCap {
+                ip: ip.ip.clone(),
+                port: i64::from(cfg.port),
+                protocol: listen_protocol,
+            },
+            points_at,
         });
     }
 
@@ -174,20 +185,19 @@ pub fn derive_server_config(
         forwardings,
     };
     config.validate()?;
-    let toml = config.to_toml_string()?;
     Ok(DerivedConfig {
         config,
-        toml,
-        nodes: used.nodes(),
-        edges: used.edges(),
+        forwardings: deps,
     })
 }
 
+/// Walks the destination side of one pod, collecting into `points_at` every
+/// listener on another server this forwarding will dial.
 fn derive_destination(
     index: &DeriveIndex<'_>,
     node: &NodeWithPorts,
     visited: &mut Vec<String>,
-    used: &mut Used,
+    points_at: &mut Vec<ListenerCap>,
 ) -> Result<ForwardingTo, DeriveError> {
     let key = record_key(&node.node.id.0);
     if visited.contains(&key) {
@@ -196,7 +206,6 @@ fn derive_destination(
         });
     }
     visited.push(key);
-    used.node(&node.node.id);
 
     let result = match &node.node.spec {
         NodeSpec::Exit(cfg) => ForwardingTo::Exit {
@@ -220,9 +229,8 @@ fn derive_destination(
             };
             // The relay dials the pod feeding its listen side.
             let listen_port = index.port_by_key(node, "listen");
-            let listen_edge = listen_port.and_then(|p| index.edge_on(p));
             let pod = listen_port.and_then(|p| index.peer(p));
-            let (Some(pod), Some(listen_edge)) = (pod, listen_edge) else {
+            let Some(pod) = pod else {
                 return Err(DeriveError::RelayWithoutPod {
                     node: node.node.name.clone(),
                 });
@@ -232,14 +240,19 @@ fn derive_destination(
                     node: node.node.name.clone(),
                 });
             };
-            used.node(&pod.node.id);
-            used.edge(&listen_edge.id);
             let pod_ip = index.ip(&record_key(&pod_cfg.ip.0)).ok_or_else(|| {
                 DeriveError::MissingIpRecord {
                     node: pod.node.name.clone(),
                     ip: record_key(&pod_cfg.ip.0),
                 }
             })?;
+            // The override says *how* to reach the pod; the pod's own socket is
+            // what identifies the listener we depend on.
+            points_at.push(ListenerCap {
+                ip: pod_ip.ip.clone(),
+                port: i64::from(pod_cfg.port),
+                protocol: ListenProtocol::RelayTcp,
+            });
             let host = cfg
                 .override_ip_address
                 .clone()
@@ -259,14 +272,10 @@ fn derive_destination(
         NodeSpec::LoadBalanceDistribute(cfg) => {
             let mut members = smallvec::SmallVec::new();
             for port in inputs_in_order(node) {
-                let Some(edge) = index.edge_on(port) else {
+                let Some(member) = index.peer(port) else {
                     continue; // unconnected members are skipped
                 };
-                let Some(member) = index.peer(port) else {
-                    continue;
-                };
-                used.edge(&edge.id);
-                members.push(derive_destination(index, member, visited, used)?);
+                members.push(derive_destination(index, member, visited, points_at)?);
             }
             ForwardingTo::LoadBalance(Box::new(LoadBalanceGroup {
                 strategy: cfg.mode.into(),
@@ -279,13 +288,12 @@ fn derive_destination(
                     node: node.node.name.clone(),
                 }
             })?;
-            let (Some(edge), Some(source)) = (index.edge_on(port), index.peer(port)) else {
+            let Some(source) = index.peer(port) else {
                 return Err(DeriveError::UnsupportedSpec {
                     node: node.node.name.clone(),
                 });
             };
-            used.edge(&edge.id);
-            derive_destination(index, source, visited, used)?
+            derive_destination(index, source, visited, points_at)?
         }
         NodeSpec::Pod(_)
         | NodeSpec::Entry(_)
@@ -316,36 +324,6 @@ fn relay_protocol_name(protocol: EntityRelayProtocol) -> &'static str {
         EntityRelayProtocol::TcpRaw => "tcp_raw",
         EntityRelayProtocol::TcpTls => "tcp_tls",
         EntityRelayProtocol::Quic => "quic",
-    }
-}
-
-/// The node and edge rows a derived config depends on.
-#[derive(Default)]
-struct Used {
-    nodes: HashMap<String, NodeId>,
-    edges: HashMap<String, EdgeConnectionId>,
-}
-
-impl Used {
-    fn node(&mut self, id: &NodeId) {
-        self.nodes.insert(record_key(&id.0), id.clone());
-    }
-    fn edge(&mut self, id: &EdgeConnectionId) {
-        self.edges.insert(record_key(&id.0), id.clone());
-    }
-    fn nodes(&self) -> Vec<NodeId> {
-        let mut keys: Vec<String> = self.nodes.keys().cloned().collect();
-        keys.sort();
-        keys.into_iter()
-            .filter_map(|k| self.nodes.get(&k).cloned())
-            .collect()
-    }
-    fn edges(&self) -> Vec<EdgeConnectionId> {
-        let mut keys: Vec<String> = self.edges.keys().cloned().collect();
-        keys.sort();
-        keys.into_iter()
-            .filter_map(|k| self.edges.get(&k).cloned())
-            .collect()
     }
 }
 

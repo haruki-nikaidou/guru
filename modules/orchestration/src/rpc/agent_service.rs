@@ -1,10 +1,10 @@
 //! The `WorkerAgent` gRPC service: registration, config streaming, acknowledgement.
 
-use crate::entities::surreal::revision::FindServerConfigRevision;
 use crate::entities::surreal::server::{
     ClaimServerWatchSession, FindServerById, ReleaseServerWatchSession, RenewServerWatchSession,
     ServerEntity, ServerId,
 };
+use crate::entities::surreal::view::TakeInFlight;
 use crate::rpc::agent_middleware::agent_from_request;
 use crate::services::agent::{AckConfig, AgentService, RegisterWorker};
 use crate::services::watch::{AgentSignal, SessionLease, WatchFence, WatchHub};
@@ -27,26 +27,6 @@ pub struct WorkerAgentGrpc {
 }
 
 impl WorkerAgentGrpc {
-    /// The stored TOML of one revision, if it is still retained.
-    ///
-    /// A database failure is *not* a missing revision: swallowing it would make the
-    /// stream skip a revision the hub has already marked as delivered, leaving the
-    /// worker on stale config until the next unrelated edit.
-    async fn revision_toml(
-        &self,
-        server: &ServerId,
-        revision: i64,
-    ) -> Result<Option<String>, Status> {
-        self.db
-            .process(FindServerConfigRevision {
-                server: server.clone(),
-                revision,
-            })
-            .await
-            .map(|row| row.map(|row| row.toml))
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
     async fn server_row(&self, server: &ServerId) -> Result<ServerEntity, Status> {
         self.db
             .process(FindServerById { id: server.clone() })
@@ -55,30 +35,39 @@ impl WorkerAgentGrpc {
             .ok_or_else(|| Status::not_found("Not found"))
     }
 
-    /// What to send for `revision`. A revision that was pruned between the signal
-    /// and the read is replaced by whatever the server should be running now;
-    /// `Ok(None)` means there is nothing to send yet.
-    async fn resolve(
+    /// Sends what the server should run next, if the database hands it to this
+    /// session.
+    ///
+    /// The decision is not made here: [`TakeInFlight`] promotes `desired` to
+    /// `in_flight` in one conditional update that also re-checks the fence, so two
+    /// streams can never be handed the same revision and a fenced-out stream is
+    /// handed nothing. A database failure ends the stream rather than silently
+    /// skipping a revision — the worker reconnects and starts over.
+    async fn try_send(
         &self,
         server: &ServerId,
-        revision: i64,
-    ) -> Result<Option<pb::ConfigRevision>, Status> {
-        if revision > 0
-            && let Some(toml) = self.revision_toml(server, revision).await?
-        {
-            return Ok(Some(pb::ConfigRevision { revision, toml }));
-        }
-        let row = self.server_row(server).await?;
-        if row.desired_revision == 0 || row.desired_revision == revision {
-            return Ok(None);
-        }
-        Ok(self
-            .revision_toml(server, row.desired_revision)
-            .await?
-            .map(|toml| pb::ConfigRevision {
-                revision: row.desired_revision,
-                toml,
+        fence: WatchFence,
+        tx: &mpsc::Sender<Result<pb::ConfigRevision, Status>>,
+    ) -> Result<bool, Status> {
+        let taken = self
+            .db
+            .process(TakeInFlight {
+                server: server.clone(),
+                generation: fence.generation,
+                epoch: fence.epoch,
+            })
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let Some(snapshot) = taken else {
+            return Ok(true);
+        };
+        Ok(tx
+            .send(Ok(pb::ConfigRevision {
+                revision: snapshot.revision,
+                toml: snapshot.toml,
             }))
+            .await
+            .is_ok())
     }
 
     /// Extends this session's lease. `false` means the fence moved on.
@@ -160,12 +149,7 @@ impl pb::worker_agent_server::WorkerAgent for WorkerAgentGrpc {
         };
 
         let server_key = ids::record_key(&server.id.0);
-        // Seeded with what this session is about to be sent, so the next poll does
-        // not re-broadcast the revision it already has.
-        let Some(subscription) = self
-            .hub
-            .subscribe(&server_key, fence, server.desired_revision)
-        else {
+        let Some(subscription) = self.hub.subscribe(&server_key, fence) else {
             // Our claim already lost to a newer one; the release is a no-op unless we
             // are somehow still the row's owner.
             self.release(&server.id, fence).await;
@@ -186,13 +170,9 @@ impl pb::worker_agent_server::WorkerAgent for WorkerAgentGrpc {
             // `Err` ends the stream: the worker reconnects with backoff and starts
             // from the row again, so a failed read is never a silently lost revision.
             let ended: Result<(), Status> = async {
-                // Send what the server should be running right now. The hub may know
-                // a newer revision than the claimed row did — that broadcast is
-                // already spent, so it has to be picked up here or never.
-                let known = server.desired_revision.max(subscription.last_revision);
-                if let Some(message) = this.resolve(&server_id, known).await?
-                    && tx.send(Ok(message)).await.is_err()
-                {
+                // Ask the database once up front: this session may be taking over a
+                // server that already has a revision waiting for it.
+                if !this.try_send(&server_id, fence, &tx).await? {
                     return Ok(());
                 }
                 loop {
@@ -211,10 +191,8 @@ impl pb::worker_agent_server::WorkerAgent for WorkerAgentGrpc {
                         signal = subscription.rx.recv() => signal,
                     };
                     match signal {
-                        Ok(AgentSignal::Revision(revision)) => {
-                            if let Some(message) = this.resolve(&server_id, revision).await?
-                                && tx.send(Ok(message)).await.is_err()
-                            {
+                        Ok(AgentSignal::Changed) => {
+                            if !this.try_send(&server_id, fence, &tx).await? {
                                 return Ok(());
                             }
                         }
@@ -233,10 +211,7 @@ impl pb::worker_agent_server::WorkerAgent for WorkerAgentGrpc {
                             if current != fence {
                                 return Err(fenced_status(fence, current));
                             }
-                            if let Some(message) =
-                                this.resolve(&server_id, row.desired_revision).await?
-                                && tx.send(Ok(message)).await.is_err()
-                            {
+                            if !this.try_send(&server_id, fence, &tx).await? {
                                 return Ok(());
                             }
                         }

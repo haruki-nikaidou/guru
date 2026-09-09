@@ -1,15 +1,16 @@
 //! Edge operations. All edge legality lives in the topology checker.
 
 use crate::entities::surreal::connection::{
-    ConnectPorts, EdgeConnectionEntity, EdgeConnectionId, FindEdgeById, ForceDeleteEdgeRow,
-    RetireEdgeRow,
+    ConnectPorts, DeleteEdgeRow, EdgeConnectionEntity, EdgeConnectionId, FindEdgeById,
 };
 use crate::entities::surreal::node::FindNodeById;
 use crate::entities::surreal::port::{FindPortById, PortId};
-use crate::entities::surreal::revision::NextRevision;
 use crate::entities::surreal::topology::LoadCanvasTopology;
+use crate::entities::surreal::view::ListServerConfigViewsByCanvas;
+use crate::services::OrchestrationError;
+use crate::services::converge::ensure_switch_safe;
+use crate::services::rollout::DirtyNotifier;
 use crate::services::topology::{TopologyEdit, ensure_valid};
-use crate::services::{OrchestrationError, rollout};
 use crate::utils::ids;
 use crate::utils::ids::record_key;
 use auth::entities::surreal::account::AccountRole;
@@ -21,6 +22,7 @@ use wakuwaku::surreal::SurrealProcessor;
 #[derive(Clone)]
 pub struct EdgeService {
     pub db: SurrealProcessor,
+    pub notifier: DirtyNotifier,
 }
 
 /// The canvas an edge endpoint belongs to.
@@ -58,26 +60,31 @@ impl Processor<Connect> for EdgeService {
                 canvas: canvas.clone(),
             })
             .await?;
-        ensure_valid(&topology.project(&[TopologyEdit::AddEdge {
+        let projected = topology.project(&[TopologyEdit::AddEdge {
             edge: EdgeConnectionEntity {
                 id: ids::edge_id("pending-0"),
                 source: input.output_port.clone(),
                 target: input.input_port.clone(),
-                created_rev: 0,
-                retired_rev: None,
             },
-        }]))?;
+        }]);
+        ensure_valid(&projected)?;
+        let views = self
+            .db
+            .process(ListServerConfigViewsByCanvas {
+                canvas: canvas.clone(),
+            })
+            .await?;
+        ensure_switch_safe(&projected, &views)?;
 
-        let revision = self.db.process(NextRevision {}).await?;
         let edge = self
             .db
             .process(ConnectPorts {
                 source: input.output_port,
                 target: input.input_port,
-                revision,
+                canvas: canvas.clone(),
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        self.notifier.notify(&canvas).await;
         Ok(edge)
     }
 }
@@ -100,9 +107,6 @@ impl Processor<Disconnect> for EdgeService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-        if edge.retired_rev.is_some() {
-            return Err(OrchestrationError::Conflict("edge is retired".into()));
-        }
         let canvas = canvas_of_port(&self.db, &edge.source).await?;
         let topology = self
             .db
@@ -110,22 +114,30 @@ impl Processor<Disconnect> for EdgeService {
                 canvas: canvas.clone(),
             })
             .await?;
-        ensure_valid(&topology.project(&[TopologyEdit::RetireEdge {
+        let projected = topology.project(&[TopologyEdit::RetireEdge {
             edge: input.edge.clone(),
-        }]))?;
-
-        let revision = self.db.process(NextRevision {}).await?;
-        self.db
-            .process(RetireEdgeRow {
-                id: input.edge,
-                revision,
+        }]);
+        ensure_valid(&projected)?;
+        let views = self
+            .db
+            .process(ListServerConfigViewsByCanvas {
+                canvas: canvas.clone(),
             })
             .await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        ensure_switch_safe(&projected, &views)?;
+
+        self.db
+            .process(DeleteEdgeRow {
+                id: input.edge,
+                canvas: canvas.clone(),
+            })
+            .await?;
+        self.notifier.notify(&canvas).await;
         Ok(())
     }
 }
 
+/// Deletes an edge without validating the canvas it leaves behind. Admin only.
 pub struct ForceDisconnect {
     pub actor: Identity,
     pub edge: EdgeConnectionId,
@@ -150,10 +162,12 @@ impl Processor<ForceDisconnect> for EdgeService {
         let canvas = canvas_of_port(&self.db, &edge.source).await?;
         tracing::info!(edge = %record_key(&edge.id.0), "force-deleting edge");
         self.db
-            .process(ForceDeleteEdgeRow { id: input.edge })
+            .process(DeleteEdgeRow {
+                id: input.edge,
+                canvas: canvas.clone(),
+            })
             .await?;
-        let revision = self.db.process(NextRevision {}).await?;
-        rollout::stamp_canvas(&self.db, &canvas, revision).await?;
+        self.notifier.notify(&canvas).await;
         Ok(())
     }
 }

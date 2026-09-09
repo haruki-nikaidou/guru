@@ -1,7 +1,6 @@
 use crate::entities::surreal::canvas::{CanvasId, CanvasUiPosition};
-use crate::entities::surreal::connection::EdgeConnectionId;
 use crate::entities::surreal::dns::DnsProviderId;
-use crate::entities::surreal::port::{PortDirection, PortEntity, PortId, PortKind};
+use crate::entities::surreal::port::{PortDirection, PortEntity, PortKind};
 use crate::entities::surreal::server::ServerIpRecordId;
 use kanau::processor::Processor;
 use newtype_record_id::table_record;
@@ -18,9 +17,6 @@ pub struct NodeEntity {
     pub comment: String,
     pub spec: NodeSpec,
     pub position: CanvasUiPosition,
-    pub created_rev: i64,
-    pub retired_rev: Option<i64>,
-    pub replaces: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, SurrealValue)]
@@ -165,24 +161,12 @@ pub struct NewPort {
     pub position: i64,
 }
 
-/// An edge that survives a node replacement, re-attached to the port carrying the
-/// same `key` on the replacement node.
-#[derive(Debug, Clone, SurrealValue)]
-pub struct CarryEdge {
-    pub old_edge: EdgeConnectionId,
-    pub new_port_key: String,
-    pub other_port: PortId,
-    pub new_port_is_source: bool,
-}
-
 pub struct CreateNodeRow {
     pub canvas: CanvasId,
     pub name: String,
     pub comment: String,
     pub spec: NodeSpec,
     pub position: CanvasUiPosition,
-    pub created_rev: i64,
-    pub replaces: Option<NodeId>,
     pub ports: Vec<NewPort>,
 }
 
@@ -199,7 +183,7 @@ impl Processor<CreateNodeRow> for SurrealProcessor {
         )
     )]
     async fn process(&self, input: CreateNodeRow) -> Result<Self::Output, Self::Error> {
-        // Statement 0 is BEGIN; the RETURN below is statement 3.
+        // Statement 0 is BEGIN; the RETURN below is statement 4.
         let mut resp = self
             .db()
             .query(include_str!("../../../sql/node/create_node_row.surql"))
@@ -208,11 +192,9 @@ impl Processor<CreateNodeRow> for SurrealProcessor {
             .bind(("comment", input.comment))
             .bind(("spec", input.spec))
             .bind(("position", input.position))
-            .bind(("created_rev", input.created_rev))
-            .bind(("replaces", input.replaces))
             .bind(("new_ports", input.ports))
             .await?;
-        resp.take::<Option<NodeWithPorts>>(3)?
+        resp.take::<Option<NodeWithPorts>>(4)?
             .ok_or_else(|| surrealdb::Error::internal("create node returned no row".to_string()))
     }
 }
@@ -286,80 +268,54 @@ impl Processor<UpdateNodeMetaRow> for SurrealProcessor {
     }
 }
 
-#[derive(Debug)]
-pub struct RetireNodeRow {
+/// Rewrites a node's spec and reshapes its ports in place.
+///
+/// A port whose key survives keeps its row id, so the edges attached to it stay
+/// attached; ports whose key disappears are deleted with their edges (the service
+/// refuses the edit before that can happen silently).
+pub struct UpdateNodeSpecRow {
     pub id: NodeId,
-    pub revision: i64,
-}
-
-impl Processor<RetireNodeRow> for SurrealProcessor {
-    type Output = ();
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:RetireNodeRow", skip(self), err)]
-    async fn process(&self, input: RetireNodeRow) -> Result<Self::Output, Self::Error> {
-        self.db()
-            .query(include_str!("../../../sql/node/retire_node_row.surql"))
-            .bind(("id", input.id))
-            .bind(("revision", input.revision))
-            .await?
-            .check()?;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct ForceDeleteNodeRow {
-    pub id: NodeId,
-}
-
-impl Processor<ForceDeleteNodeRow> for SurrealProcessor {
-    type Output = ();
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:ForceDeleteNodeRow", skip(self), err)]
-    async fn process(&self, input: ForceDeleteNodeRow) -> Result<Self::Output, Self::Error> {
-        self.db()
-            .query(include_str!(
-                "../../../sql/node/force_delete_node_row.surql"
-            ))
-            .bind(("id", input.id))
-            .await?
-            .check()?;
-        Ok(())
-    }
-}
-
-pub struct ReplaceNodeRow {
-    pub old: NodeId,
     pub canvas: CanvasId,
-    pub name: String,
-    pub comment: String,
     pub spec: NodeSpec,
-    pub position: CanvasUiPosition,
-    pub revision: i64,
     pub ports: Vec<NewPort>,
-    pub carry: Vec<CarryEdge>,
 }
 
-impl Processor<ReplaceNodeRow> for SurrealProcessor {
+impl Processor<UpdateNodeSpecRow> for SurrealProcessor {
     type Output = NodeWithPorts;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:ReplaceNodeRow", skip_all, err, fields(old = ?input.old, canvas = ?input.canvas))]
-    async fn process(&self, input: ReplaceNodeRow) -> Result<Self::Output, Self::Error> {
-        // Statement 0 is BEGIN; the RETURN below is statement 7.
+    #[tracing::instrument(name = "Query-Transaction:UpdateNodeSpecRow", skip_all, err, fields(id = ?input.id))]
+    async fn process(&self, input: UpdateNodeSpecRow) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 6.
         let mut resp = self
             .db()
-            .query(include_str!("../../../sql/node/replace_node_row.surql"))
-            .bind(("old", input.old))
+            .query(include_str!("../../../sql/node/update_node_spec_row.surql"))
+            .bind(("id", input.id))
             .bind(("canvas", input.canvas))
-            .bind(("name", input.name))
-            .bind(("comment", input.comment))
             .bind(("spec", input.spec))
-            .bind(("position", input.position))
-            .bind(("revision", input.revision))
             .bind(("new_ports", input.ports))
-            .bind(("carry", input.carry))
             .await?;
-        resp.take::<Option<NodeWithPorts>>(7)?
-            .ok_or_else(|| surrealdb::Error::internal("replace node returned no row".to_string()))
+        resp.take::<Option<NodeWithPorts>>(6)?
+            .ok_or_else(|| surrealdb::Error::internal("update node returned no row".to_string()))
+    }
+}
+
+#[derive(Debug)]
+pub struct DeleteNodeRow {
+    pub id: NodeId,
+    pub canvas: CanvasId,
+}
+
+impl Processor<DeleteNodeRow> for SurrealProcessor {
+    type Output = ();
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query-Transaction:DeleteNodeRow", skip(self), err)]
+    async fn process(&self, input: DeleteNodeRow) -> Result<Self::Output, Self::Error> {
+        self.db()
+            .query(include_str!("../../../sql/node/delete_node_row.surql"))
+            .bind(("id", input.id))
+            .bind(("canvas", input.canvas))
+            .await?
+            .check()?;
+        Ok(())
     }
 }

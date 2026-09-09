@@ -60,4 +60,5 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 surrealdb = { workspace = true, features = ["kv-mem"] }
+testcontainers-modules = { version = "0.15.0", features = ["rabbitmq"] }
 tokio = { workspace = true }

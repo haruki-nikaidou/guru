@@ -6,12 +6,15 @@
 //! 2. resolve the canvas it targets,
 //! 3. load the current [`CanvasTopology`](crate::entities::surreal::topology::CanvasTopology),
 //! 4. validate the topology the change *would* produce and reject it before writing,
-//! 5. allocate a global revision,
-//! 6. write the rows,
-//! 7. re-derive every server of the canvas ([`rollout::stamp_canvas`]).
+//! 5. reject it as well if it would break a listener the fabric still depends on
+//!    ([`converge::ensure_switch_safe`]),
+//! 6. write the rows and bump the canvas generation in one transaction,
+//! 7. publish [`CanvasDirty`](crate::events::CanvasDirty) so the derivation hook
+//!    picks the canvas up ([`rollout::DirtyNotifier`]).
 
 pub mod agent;
 pub mod canvas;
+pub mod converge;
 pub mod derive;
 pub mod edge;
 pub mod node;
@@ -20,6 +23,7 @@ pub mod server;
 pub mod topology;
 pub mod watch;
 
+use crate::services::converge::ConvergeError;
 use crate::services::derive::DeriveError;
 use crate::services::topology::TopologyError;
 
@@ -33,6 +37,8 @@ pub enum OrchestrationError {
     Topology(#[from] Box<TopologyError>),
     #[error("derive: {0}")]
     Derive(#[from] DeriveError),
+    #[error("converge: {0}")]
+    Converge(#[from] ConvergeError),
     #[error("{0}")]
     Invalid(String),
     #[error("{0}")]
@@ -53,6 +59,7 @@ impl From<OrchestrationError> for tonic::Status {
             }
             OrchestrationError::Topology(e) => tonic::Status::failed_precondition(e.to_string()),
             OrchestrationError::Derive(e) => tonic::Status::failed_precondition(e.to_string()),
+            OrchestrationError::Converge(e) => tonic::Status::failed_precondition(e.to_string()),
             OrchestrationError::Invalid(message) => tonic::Status::invalid_argument(message),
             OrchestrationError::Conflict(message) => tonic::Status::failed_precondition(message),
             OrchestrationError::NotFound => tonic::Status::not_found("Not found"),

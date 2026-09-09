@@ -12,9 +12,10 @@ src/
 ├── config.rs       # strongly typed module configuration (DB-backed, Redis-cached)
 ├── utils/ids.rs    # record id ↔ wire string conversion
 ├── entities/
-│   └── surreal/    # canvas, server, node, port, connection, revision, topology
-├── services/       # CRUD, topology rules, config derivation, rollout, agent, watch
-├── hooks/gc.rs     # the RCU garbage collector
+│   └── surreal/    # canvas, server, node, port, connection, view, topology
+├── services/       # CRUD, topology rules, derivation, convergence, rollout, agent, watch
+├── events/         # `CanvasDirty`, the derivation trigger
+├── hooks/derive.rs # the derivation consumer and its cron sweep
 └── rpc/            # the operator API and the worker API, plus refresh-key middleware
 ```
 
@@ -30,25 +31,52 @@ A canvas is a bipartite dataflow over two independent port kinds:
 Every port carries at most one edge. `CanvasImport`/`CanvasExport` are rejected
 until subcanvases land.
 
-## RCU
+## The config view
 
-Nodes and edges are never mutated in place. A spec change writes a replacement row
-and stamps the old one with the global revision that retired it
-(`DEFINE SEQUENCE orchestration_revision`). Each server keeps
-`orchestration_server_config_revision` rows for the configs it might still be
-running; the collector in `hooks::gc` deletes a retired row only once no retained
-revision references it. `ForceDeleteNode`/`ForceDisconnect` (Admin only) bypass
-this and delete immediately.
+Rows are edited in place. What a worker runs lives in one
+`orchestration_server_config_view` row per server, holding three immutable
+snapshots — `desired` (latest derivation), `in_flight` (handed to the worker, not
+yet acknowledged) and `applied` (what it runs). A snapshot is self-contained: the
+rendered TOML plus, per `[[forwarding]]`, the listener it serves and the listeners
+it points at.
 
 ## Rollout
 
 ```
-mutation ─► validate projected topology ─► write rows ─► stamp_canvas
+mutation ─► validate projected topology ─► write rows + bump canvas generation
                                                             │
-                                     derive per server ─────┴─► revision row + desired_revision
+                                                    publish CanvasDirty
+                                                            │
+       hooks::derive ─► derive + converge every server ─────┴─► desired snapshot
+                             (cron sweep re-derives anything the message missed)
                                                                         │
 worker: Register ─► WatchConfig (stream) ─► apply ─► AckConfig ─────────┘
 ```
+
+Derivation is fenced by `orchestration_canvas.generation`: a pass derives at the
+generation it read and commits only while the canvas is still there, so a
+concurrent edit is never overwritten — the pass just loses and is redone. The
+`CanvasDirty` message is only latency: `generation > derived_generation` is what
+actually decides, and the cron sweep acts on it, so a broker outage costs delay
+and never correctness.
+
+## Seamless switching
+
+Derivation says what a server *should* serve; `services::converge` says what it
+may serve *now*, given what every other server is running:
+
+- a forwarding is only pointed at a listener some server's `applied` snapshot
+  already serves — otherwise the previous shape is held and the server is
+  recorded as `waiting_for` the target;
+- a listener is kept alive for as long as any snapshot still points at it, even
+  after the canvas stopped asking for it.
+
+A multi-hop change therefore converges in as many passes as it has hops, with no
+coordinator and no ordering. An edit that would put a *different protocol* on an
+ip:port some server still dials has no seamless path at all and is rejected at
+edit time. A server that is gone for good is cleared with `ForgetServerApplied`
+(Admin only, like the other operations that bypass a safety invariant), so its
+dependants stop waiting for it.
 
 A worker registers with an **operator API key** and receives a dynamic refresh key
 that it keeps in memory only; the master stores its SHA-256 digest. Re-registering

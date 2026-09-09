@@ -4,11 +4,10 @@ use crate::entities::surreal::canvas::{
     CanvasContents, CanvasEntity, CanvasId, CreateCanvas as CreateCanvasRow, DeleteCanvasRow,
     FindCanvasById, ListCanvases as ListCanvasesRow, UpdateCanvasMeta,
 };
-use crate::entities::surreal::node::RetireNodeRow;
-use crate::entities::surreal::revision::NextRevision;
 use crate::entities::surreal::topology::{LoadCanvasContents, LoadCanvasTopology};
+use crate::services::OrchestrationError;
+use crate::services::rollout::DirtyNotifier;
 use crate::services::topology::{TopologyProblem, analyze};
-use crate::services::{OrchestrationError, rollout};
 use auth::services::identity::Identity;
 use auth::utils::rbac::Permission;
 use kanau::processor::Processor;
@@ -17,6 +16,7 @@ use wakuwaku::surreal::SurrealProcessor;
 #[derive(Clone)]
 pub struct CanvasService {
     pub db: SurrealProcessor,
+    pub notifier: DirtyNotifier,
 }
 
 pub struct CreateCanvas {
@@ -120,6 +120,11 @@ pub struct DeleteCanvas {
 impl Processor<DeleteCanvas> for CanvasService {
     type Output = ();
     type Error = OrchestrationError;
+    /// Deletes the canvas and everything under it in one transaction.
+    ///
+    /// Workers of the deleted servers keep running their last config: there is no
+    /// canvas left to derive an empty one from, and no view row to send it through.
+    /// This is the same behaviour as deleting a single server.
     #[tracing::instrument(name = "Service:DeleteCanvas", skip_all, err)]
     async fn process(&self, input: DeleteCanvas) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::EditWorkspace)?;
@@ -129,25 +134,6 @@ impl Processor<DeleteCanvas> for CanvasService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-
-        // Retire the graph first so every server derives an empty config, then drop
-        // the canvas and its servers; the GC frees the retired rows afterwards.
-        let revision = self.db.process(NextRevision {}).await?;
-        let topology = self
-            .db
-            .process(LoadCanvasTopology {
-                canvas: input.canvas.clone(),
-            })
-            .await?;
-        for node in &topology.nodes {
-            self.db
-                .process(RetireNodeRow {
-                    id: node.node.id.clone(),
-                    revision,
-                })
-                .await?;
-        }
-        rollout::stamp_canvas(&self.db, &input.canvas, revision).await?;
         self.db
             .process(DeleteCanvasRow { id: input.canvas })
             .await?;
