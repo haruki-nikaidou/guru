@@ -405,8 +405,6 @@ fn projection_validates_a_change_before_it_is_written() {
         id: ids::edge_id("pending-0"),
         source: port("exit", "destination"),
         target: port("pod", "destination"),
-        created_rev: 2,
-        retired_rev: None,
     };
     let projected = topology.project(&[TopologyEdit::AddEdge { edge: extra }]);
     let err = ensure_valid(&projected).expect_err("oversubscribed port must be rejected");

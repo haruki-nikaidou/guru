@@ -1,0 +1,369 @@
+//! The per-server config view: what a server should run, what is in flight, and
+//! what it is actually running.
+//!
+//! Exactly one row exists per server. Each of the three slots holds a whole
+//! [`ConfigSnapshot`] — the rendered TOML plus the listener capabilities it serves
+//! and points at — so convergence never has to re-derive a config from rows that
+//! have since been edited in place.
+
+use crate::entities::surreal::canvas::CanvasId;
+use crate::entities::surreal::server::ServerId;
+use crate::entities::surreal::topology::CanvasTopology;
+use chrono::{DateTime, Utc};
+use kanau::processor::Processor;
+use newtype_record_id::table_record;
+use std::net::{AddrParseError, SocketAddr};
+use surrealdb_types::SurrealValue;
+use wakuwaku::surreal::SurrealProcessor;
+
+table_record!(ServerConfigViewId, "orchestration_server_config_view");
+
+/// How a listener speaks to whoever dials it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SurrealValue)]
+#[surreal(untagged, rename_all = "snake_case")]
+pub enum ListenProtocol {
+    Raw,
+    RelayTcp,
+    RelayTls,
+    RelayQuic,
+}
+
+/// A listener another server can point at.
+///
+/// Identity is by content: the same ip/port/protocol is the same capability
+/// whichever node row produced it. That is what lets a server keep serving a
+/// listener across an unrelated edit while its dependants still reference it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, SurrealValue)]
+pub struct ListenerCap {
+    pub ip: String,
+    pub port: i64,
+    pub protocol: ListenProtocol,
+}
+
+impl ListenerCap {
+    /// Same socket, different protocol: the two cannot coexist on one worker, so a
+    /// switch between them can never be made seamlessly.
+    pub fn conflicts(&self, other: &Self) -> bool {
+        self.ip == other.ip
+            && self.port == other.port
+            && self.transport() == other.transport()
+            && self.protocol != other.protocol
+    }
+
+    pub fn transport(&self) -> guru_worker_config::Transport {
+        match self.protocol {
+            ListenProtocol::RelayQuic => guru_worker_config::Transport::Quic,
+            _ => guru_worker_config::Transport::Tcp,
+        }
+    }
+
+    pub fn socket(&self) -> Result<SocketAddr, AddrParseError> {
+        format!("{}:{}", self.ip, self.port).parse()
+    }
+}
+
+/// One `[[forwarding]]` entry's place in the dependency graph.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ForwardingDeps {
+    pub serves: ListenerCap,
+    pub points_at: Vec<ListenerCap>,
+}
+
+/// An immutable rendering of one server's config.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ConfigSnapshot {
+    pub revision: i64,
+    pub toml: String,
+    pub created_at: DateTime<Utc>,
+    /// Index-aligned with the `[[forwarding]]` entries of `toml`.
+    pub forwardings: Vec<ForwardingDeps>,
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ServerConfigViewEntity {
+    pub id: ServerConfigViewId,
+    pub server: ServerId,
+    /// The newest derivation. Never sent directly: a stream promotes it to
+    /// `in_flight` with a conditional update.
+    pub desired: Option<ConfigSnapshot>,
+    /// Sent to the worker and not yet acknowledged. At most one at a time.
+    pub in_flight: Option<ConfigSnapshot>,
+    /// What the worker last told us it is running.
+    pub applied: Option<ConfigSnapshot>,
+    pub failed_revision: Option<i64>,
+    pub apply_error: Option<String>,
+    pub derive_error: Option<String>,
+    /// Servers whose `applied` config does not yet serve a listener this server's
+    /// ideal config points at.
+    pub waiting_for: Vec<ServerId>,
+}
+
+#[derive(Debug)]
+pub struct FindServerConfigView {
+    pub server: ServerId,
+}
+
+impl Processor<FindServerConfigView> for SurrealProcessor {
+    type Output = Option<ServerConfigViewEntity>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:FindServerConfigView", skip(self), err)]
+    async fn process(&self, input: FindServerConfigView) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query("SELECT * FROM orchestration_server_config_view WHERE server = $server LIMIT 1")
+            .bind(("server", input.server))
+            .await?;
+        resp.take::<Option<ServerConfigViewEntity>>(0)
+    }
+}
+
+#[derive(Debug)]
+pub struct ListServerConfigViewsByCanvas {
+    pub canvas: CanvasId,
+}
+
+impl Processor<ListServerConfigViewsByCanvas> for SurrealProcessor {
+    type Output = Vec<ServerConfigViewEntity>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:ListServerConfigViewsByCanvas", skip(self), err)]
+    async fn process(
+        &self,
+        input: ListServerConfigViewsByCanvas,
+    ) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query("SELECT * FROM orchestration_server_config_view WHERE server.canvas = $canvas")
+            .bind(("canvas", input.canvas))
+            .await?;
+        resp.take::<Vec<ServerConfigViewEntity>>(0)
+    }
+}
+
+/// Hands `desired` to the calling stream by promoting it to `in_flight`.
+///
+/// The whole decision is one conditional update, so two streams can never be sent
+/// the same revision and a fenced-out stream is sent nothing at all: the fence is
+/// checked against the server row inside the same transaction.
+#[derive(Debug)]
+pub struct TakeInFlight {
+    pub server: ServerId,
+    pub generation: i64,
+    pub epoch: i64,
+}
+
+impl Processor<TakeInFlight> for SurrealProcessor {
+    /// The snapshot to send, or `None` when there is nothing to hand out.
+    type Output = Option<ConfigSnapshot>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query-Transaction:TakeInFlight", skip(self), err)]
+    async fn process(&self, input: TakeInFlight) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 3.
+        let mut resp = self
+            .db()
+            .query(include_str!("../../../sql/view/take_in_flight.surql"))
+            .bind(("server", input.server))
+            .bind(("generation", input.generation))
+            .bind(("epoch", input.epoch))
+            .await?;
+        resp.take::<Option<ConfigSnapshot>>(3)
+    }
+}
+
+/// Promotes `in_flight` to `applied`, or records why the worker refused it.
+#[derive(Debug)]
+pub struct AckServerConfig {
+    pub server: ServerId,
+    pub canvas: CanvasId,
+    pub revision: i64,
+    pub error: Option<String>,
+}
+
+impl Processor<AckServerConfig> for SurrealProcessor {
+    /// `false` when the acknowledged revision is not the one in flight.
+    type Output = bool;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query-Transaction:AckServerConfig", skip(self), err)]
+    async fn process(&self, input: AckServerConfig) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 3.
+        let mut resp = self
+            .db()
+            .query(include_str!("../../../sql/view/ack_server_config.surql"))
+            .bind(("server", input.server))
+            .bind(("canvas", input.canvas))
+            .bind(("revision", input.revision))
+            .bind(("error", input.error))
+            .await?;
+        Ok(resp.take::<Option<bool>>(3)?.unwrap_or(false))
+    }
+}
+
+/// Clears a dead server's applied state so servers waiting on it can proceed.
+#[derive(Debug)]
+pub struct ForgetServerAppliedRow {
+    pub server: ServerId,
+    pub canvas: CanvasId,
+}
+
+impl Processor<ForgetServerAppliedRow> for SurrealProcessor {
+    type Output = ();
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query-Transaction:ForgetServerAppliedRow", skip(self), err)]
+    async fn process(&self, input: ForgetServerAppliedRow) -> Result<Self::Output, Self::Error> {
+        self.db()
+            .query(include_str!(
+                "../../../sql/view/forget_server_applied.surql"
+            ))
+            .bind(("server", input.server))
+            .bind(("canvas", input.canvas))
+            .await?
+            .check()?;
+        Ok(())
+    }
+}
+
+/// What the watch poller compares between ticks.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ServerWatchState {
+    pub id: ServerId,
+    pub refresh_key_generation: i64,
+    pub watch_epoch: i64,
+    pub desired_revision: Option<i64>,
+    pub in_flight_revision: Option<i64>,
+    pub failed_revision: Option<i64>,
+}
+
+pub struct ListServerWatchState {
+    pub servers: Vec<ServerId>,
+}
+
+impl Processor<ListServerWatchState> for SurrealProcessor {
+    type Output = Vec<ServerWatchState>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:ListServerWatchState", skip_all, err)]
+    async fn process(&self, input: ListServerWatchState) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query(
+                "SELECT server AS id, server.refresh_key_generation AS refresh_key_generation,
+                     server.watch_epoch AS watch_epoch, desired.revision AS desired_revision,
+                     in_flight.revision AS in_flight_revision, failed_revision
+                 FROM orchestration_server_config_view WHERE server IN $servers",
+            )
+            .bind(("servers", input.servers))
+            .await?;
+        resp.take::<Vec<ServerWatchState>>(0)
+    }
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+struct CanvasGenerations {
+    generation: i64,
+    derived_generation: i64,
+}
+
+/// Everything one derivation pass reads, in a single transaction.
+#[derive(Debug, Clone)]
+pub struct DerivationInput {
+    pub generation: i64,
+    pub derived_generation: i64,
+    pub topology: CanvasTopology,
+    pub views: Vec<ServerConfigViewEntity>,
+}
+
+pub struct LoadCanvasDerivationInput {
+    pub canvas: CanvasId,
+}
+
+impl Processor<LoadCanvasDerivationInput> for SurrealProcessor {
+    /// `None` when the canvas has been deleted.
+    type Output = Option<DerivationInput>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query-Transaction:LoadCanvasDerivationInput", skip_all, err)]
+    async fn process(&self, input: LoadCanvasDerivationInput) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the reads start at statement 1.
+        let mut resp = self
+            .db()
+            .query(include_str!(
+                "../../../sql/view/load_derivation_input.surql"
+            ))
+            .bind(("canvas", input.canvas.clone()))
+            .await?;
+        let Some(generations) = resp.take::<Option<CanvasGenerations>>(1)? else {
+            return Ok(None);
+        };
+        let (servers, ips, nodes, edges) =
+            crate::entities::surreal::topology::group_rows(&mut resp, 2)?;
+        let views = resp.take::<Vec<ServerConfigViewEntity>>(7)?;
+        Ok(Some(DerivationInput {
+            generation: generations.generation,
+            derived_generation: generations.derived_generation,
+            topology: CanvasTopology {
+                canvas: input.canvas,
+                servers,
+                ips,
+                nodes,
+                edges,
+            },
+            views,
+        }))
+    }
+}
+
+/// One server's outcome of a derivation pass.
+///
+/// `desired: None` means "leave the slot alone" — either the derivation failed or
+/// it produced byte-identical TOML.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ViewUpdate {
+    pub server: ServerId,
+    pub desired: Option<ConfigSnapshot>,
+    pub derive_error: Option<String>,
+    pub waiting_for: Vec<ServerId>,
+    /// A new desired revision clears the previous failure, so a fixed config is
+    /// offered to the worker again.
+    pub clear_failure: bool,
+}
+
+/// Commits a whole derivation pass, but only if the canvas is still at the
+/// generation it was derived from.
+pub struct CommitCanvasDerivation {
+    pub canvas: CanvasId,
+    pub generation: i64,
+    pub updates: Vec<ViewUpdate>,
+}
+
+impl Processor<CommitCanvasDerivation> for SurrealProcessor {
+    /// `false` when the canvas moved on and the pass has to be redone.
+    type Output = bool;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query-Transaction:CommitCanvasDerivation", skip_all, err)]
+    async fn process(&self, input: CommitCanvasDerivation) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN, 1 the LET, 2 the IF; the RETURN is statement 3.
+        let mut resp = self
+            .db()
+            .query(include_str!("../../../sql/view/commit_derivation.surql"))
+            .bind(("canvas", input.canvas))
+            .bind(("generation", input.generation))
+            .bind(("updates", input.updates))
+            .await?;
+        Ok(resp.take::<Option<bool>>(3)?.unwrap_or(false))
+    }
+}
+
+/// Canvases whose derivation is behind their edits; the cron sweep's input.
+pub struct ListStaleCanvases;
+
+impl Processor<ListStaleCanvases> for SurrealProcessor {
+    type Output = Vec<CanvasId>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:ListStaleCanvases", skip_all, err)]
+    async fn process(&self, _input: ListStaleCanvases) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query(
+                "SELECT VALUE id FROM orchestration_canvas WHERE generation > derived_generation",
+            )
+            .await?;
+        resp.take::<Vec<CanvasId>>(0)
+    }
+}

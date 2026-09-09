@@ -13,6 +13,10 @@ pub struct CanvasEntity {
     pub id: CanvasId,
     pub name: String,
     pub description: String,
+    /// Bumped by every mutating transaction; the derivation fence.
+    pub generation: i64,
+    /// The generation the stored config views were derived from.
+    pub derived_generation: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SurrealValue)]
@@ -21,8 +25,7 @@ pub struct CanvasUiPosition {
     pub y: i64,
 }
 
-/// Everything the dashboard renders for one canvas: live rows **and** rows that are
-/// retired but not yet garbage-collected, so a rollout in flight stays visible.
+/// Everything the dashboard renders for one canvas.
 #[derive(Debug, Clone)]
 pub struct CanvasContents {
     pub canvas: CanvasEntity,
@@ -45,7 +48,10 @@ impl Processor<CreateCanvas> for SurrealProcessor {
         let mut resp = self
             .db()
             .query(
-                "CREATE ONLY orchestration_canvas CONTENT { name: $name, description: $description }",
+                "CREATE ONLY orchestration_canvas CONTENT {
+                     name: $name, description: $description,
+                     generation: 0, derived_generation: 0
+                 }",
             )
             .bind(("name", input.name))
             .bind(("description", input.description))

@@ -109,7 +109,6 @@ pub async fn node(
     name: &str,
     spec: NodeSpec,
     ports: Vec<NewPort>,
-    revision: i64,
 ) -> Result<NodeWithPorts, surrealdb::Error> {
     sp.process(CreateNodeRow {
         canvas: canvas.id.clone(),
@@ -117,8 +116,6 @@ pub async fn node(
         comment: String::new(),
         spec,
         position: pos(0, 0),
-        created_rev: revision,
-        replaces: None,
         ports,
     })
     .await

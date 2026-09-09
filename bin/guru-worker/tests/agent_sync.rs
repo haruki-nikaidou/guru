@@ -1,9 +1,9 @@
 //! End-to-end worker ↔ master config sync against an in-process master.
 //!
 //! The master here is the real thing: `mem://` SurrealDB with both schemas, the
-//! real auth services and middleware, the real `WorkerAgent` service and the real
-//! revision poller. The worker side is `guru_worker::agent`, driving a real
-//! `Supervisor` that binds real sockets.
+//! real auth services and middleware, the real `WorkerAgent` service, the real
+//! config-view poller and the real derivation sweep. The worker side is
+//! `guru_worker::agent`, driving a real `Supervisor` that binds real sockets.
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
@@ -19,13 +19,16 @@ use guru_worker::supervisor::Supervisor;
 use kanau::processor::Processor;
 use orchestration::entities::surreal::canvas::CanvasUiPosition;
 use orchestration::entities::surreal::node::{EntryConfig, ExitConfig, NodeSpec, PodConfig};
-use orchestration::entities::surreal::server::{FindServerById, ServerId, ServerIpv6Resolve};
+use orchestration::entities::surreal::server::{ServerId, ServerIpv6Resolve};
+use orchestration::entities::surreal::view::{FindServerConfigView, ServerConfigViewEntity};
+use orchestration::hooks::derive::{self, CanvasDeriver};
 use orchestration::rpc::WorkerAgentGrpc;
 use orchestration::rpc::agent_middleware::AgentLayer;
 use orchestration::services::agent::AgentService;
 use orchestration::services::canvas::{CanvasService, CreateCanvas};
 use orchestration::services::edge::{Connect, EdgeService};
 use orchestration::services::node::{CreateNode, NodeService, ReplaceNodeSpec};
+use orchestration::services::rollout::DirtyNotifier;
 use orchestration::services::server::{AddServerIp, CreateServer, ServerService};
 use orchestration::services::watch::{self, SessionLease, WatchHub};
 use orchestration::utils::ids;
@@ -139,6 +142,7 @@ async fn serve(
         db: db.clone(),
         hub: hub.clone(),
         lease,
+        notifier: DirtyNotifier::default(),
     };
     let service = WorkerAgentGrpc {
         agents: agents.clone(),
@@ -168,6 +172,13 @@ async fn serve(
         Duration::from_millis(50),
         poller_token,
     ));
+    // No broker in the test image: the sweep is the only derivation trigger, which
+    // is exactly the deployment the AMQP path is allowed to degrade to.
+    tokio::spawn(derive::run_sweeper(
+        CanvasDeriver { db: db.clone() },
+        Duration::from_millis(50),
+        shutdown.clone(),
+    ));
     Ok(addr)
 }
 
@@ -180,10 +191,22 @@ struct Canvas {
 
 /// One server with a single `pod -> entry` / `exit -> pod` chain on loopback.
 async fn build_canvas(db: &SurrealProcessor) -> Result<Canvas, Box<dyn std::error::Error>> {
-    let canvases = CanvasService { db: db.clone() };
-    let servers = ServerService { db: db.clone() };
-    let nodes = NodeService { db: db.clone() };
-    let edges = EdgeService { db: db.clone() };
+    let canvases = CanvasService {
+        db: db.clone(),
+        notifier: DirtyNotifier::default(),
+    };
+    let servers = ServerService {
+        db: db.clone(),
+        notifier: DirtyNotifier::default(),
+    };
+    let nodes = NodeService {
+        db: db.clone(),
+        notifier: DirtyNotifier::default(),
+    };
+    let edges = EdgeService {
+        db: db.clone(),
+        notifier: DirtyNotifier::default(),
+    };
 
     let canvas = canvases
         .process(CreateCanvas {
@@ -285,25 +308,30 @@ async fn build_canvas(db: &SurrealProcessor) -> Result<Canvas, Box<dyn std::erro
     })
 }
 
-/// Waits until `check` holds for the server row, or fails the test.
+/// Waits until `check` holds for the server's config view, or fails the test.
 async fn wait_for<F>(db: &SurrealProcessor, server: &ServerId, what: &str, check: F)
 where
-    F: Fn(&orchestration::entities::surreal::server::ServerEntity) -> bool,
+    F: Fn(&ServerConfigViewEntity) -> bool,
 {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let row = db
-            .process(FindServerById { id: server.clone() })
+        let view = db
+            .process(FindServerConfigView {
+                server: server.clone(),
+            })
             .await
             .unwrap()
             .unwrap();
-        if check(&row) {
+        if check(&view) {
             return;
         }
         if std::time::Instant::now() > deadline {
             panic!(
-                "timed out waiting for {what}: desired={} applied={} error={:?}",
-                row.desired_revision, row.applied_revision, row.last_apply_error
+                "timed out waiting for {what}: desired={:?} in_flight={:?} applied={:?} error={:?}",
+                view.desired.as_ref().map(|s| s.revision),
+                view.in_flight.as_ref().map(|s| s.revision),
+                view.applied.as_ref().map(|s| s.revision),
+                view.apply_error,
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -331,8 +359,10 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
     ));
 
     // The worker registers, receives the derived config and applies it.
-    wait_for(&master.db, &canvas.server, "the first apply", |row| {
-        row.desired_revision > 0 && row.applied_revision == row.desired_revision
+    wait_for(&master.db, &canvas.server, "the first apply", |view| {
+        view.applied.is_some()
+            && view.applied.as_ref().map(|s| s.revision)
+                == view.desired.as_ref().map(|s| s.revision)
     })
     .await;
     tokio::net::TcpStream::connect(canvas.listen)
@@ -347,6 +377,7 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
     let taken_port = taken.local_addr()?.port();
     let nodes = NodeService {
         db: master.db.clone(),
+        notifier: DirtyNotifier::default(),
     };
     nodes
         .process(ReplaceNodeSpec {
@@ -359,30 +390,36 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
             item_count: 0,
         })
         .await?;
-    wait_for(&master.db, &canvas.server, "the failed apply", |row| {
-        row.last_apply_error.is_some()
+    wait_for(&master.db, &canvas.server, "the failed apply", |view| {
+        view.apply_error.is_some()
     })
     .await;
 
-    let row = master
+    let view = master
         .db
-        .process(FindServerById {
-            id: canvas.server.clone(),
+        .process(FindServerConfigView {
+            server: canvas.server.clone(),
         })
         .await?
         .unwrap();
-    assert!(
-        row.desired_revision > row.applied_revision,
-        "the bad revision was never applied"
+    assert_eq!(
+        view.failed_revision,
+        view.desired.as_ref().map(|s| s.revision),
+        "the bad revision is the one that was refused"
     );
-    assert_eq!(row.applied_revision, first_revision);
+    assert_eq!(
+        view.applied.as_ref().map(|s| s.revision),
+        Some(first_revision),
+        "the worker still runs the config that applied"
+    );
+    assert!(view.in_flight.is_none(), "the failed send is not left open");
     assert!(
-        row.last_apply_error
+        view.apply_error
             .as_deref()
             .unwrap_or_default()
             .contains("edge"),
         "the apply error names the failing forwarding: {:?}",
-        row.last_apply_error
+        view.apply_error
     );
     tokio::net::TcpStream::connect(canvas.listen)
         .await
@@ -417,19 +454,19 @@ async fn register(
     Ok(client.register(request).await?.into_inner().refresh_key)
 }
 
-/// Opens a `WatchConfig` stream and waits for its first revision, so the session
-/// is claimed by the time the call returns.
+/// Opens a `WatchConfig` stream and takes its first revision, so the session is
+/// claimed — and that revision is in flight — by the time the call returns.
 async fn watch(
     client: &mut WorkerAgentClient<tonic::transport::Channel>,
     refresh_key: &str,
-) -> Result<tonic::Streaming<ConfigRevision>, Box<dyn std::error::Error>> {
+) -> Result<(tonic::Streaming<ConfigRevision>, i64), Box<dyn std::error::Error>> {
     let mut request = tonic::Request::new(WatchConfigRequest {});
     request
         .metadata_mut()
         .insert("x-refresh-key", refresh_key.parse()?);
     let mut stream = client.watch_config(request).await?.into_inner();
-    stream.message().await?.expect("the first revision arrives");
-    Ok(stream)
+    let first = stream.message().await?.expect("the first revision arrives");
+    Ok((stream, first.revision))
 }
 
 #[tokio::test]
@@ -445,7 +482,7 @@ async fn a_heartbeating_stream_keeps_its_session_against_a_second_worker() -> Te
 
     let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
     let first_key = register(&mut client, &server_key, &api_key).await?;
-    let stream = watch(&mut client, &first_key).await?;
+    let (stream, revision) = watch(&mut client, &first_key).await?;
 
     // Well past the lease: a second worker aimed at the same server stays locked out
     // instead of trading the server back and forth with the incumbent.
@@ -455,16 +492,10 @@ async fn a_heartbeating_stream_keeps_its_session_against_a_second_worker() -> Te
         .expect_err("a live session must not be stolen");
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 
-    // The incumbent is untouched and still owns the stream.
+    // The incumbent is untouched and still owns the stream: it can ack exactly the
+    // revision the master handed it.
     let mut ack = tonic::Request::new(AckConfigRequest {
-        revision: master
-            .db
-            .process(FindServerById {
-                id: canvas.server.clone(),
-            })
-            .await?
-            .unwrap()
-            .desired_revision,
+        revision,
         error: None,
     });
     ack.metadata_mut()
@@ -487,7 +518,7 @@ async fn an_ended_stream_hands_the_session_back_at_once() -> TestResult {
 
     let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
     let first_key = register(&mut client, &server_key, &api_key).await?;
-    let stream = watch(&mut client, &first_key).await?;
+    let (stream, _) = watch(&mut client, &first_key).await?;
     drop(stream);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -533,7 +564,7 @@ async fn a_newer_stream_fences_the_previous_one() -> TestResult {
 
     let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
     let refresh_key = register(&mut client, &server_key, &api_key).await?;
-    let mut first = watch(&mut client, &refresh_key).await?;
+    let (mut first, _) = watch(&mut client, &refresh_key).await?;
     let _second = watch(&mut client, &refresh_key).await?;
 
     // One connection per server: the older stream is told to go away instead of
@@ -563,7 +594,7 @@ async fn a_rotated_refresh_key_ends_an_open_stream() -> TestResult {
 
     let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
     let first_key = register(&mut client, &server_key, &api_key).await?;
-    let mut stream = watch(&mut client, &first_key).await?;
+    let (mut stream, _) = watch(&mut client, &first_key).await?;
 
     // Simulate the incumbent going silent: its lease lapses, so a replacement worker
     // is allowed to take the server over.
@@ -603,15 +634,11 @@ async fn a_refresh_key_survives_a_master_restart() -> TestResult {
     let restart = CancellationToken::new();
     let addr = serve(&master.db, &master.hub, &restart, SessionLease::default()).await?;
     let mut client = WorkerAgentClient::connect(format!("http://{addr}")).await?;
-    let row = master
-        .db
-        .process(FindServerById {
-            id: canvas.server.clone(),
-        })
-        .await?
-        .unwrap();
+    // Take the snapshot through a stream, the way a worker does: the ack is only
+    // valid for the revision the database handed this session.
+    let (stream, revision) = watch(&mut client, &refresh_key).await?;
     let mut ack = tonic::Request::new(AckConfigRequest {
-        revision: row.desired_revision,
+        revision,
         error: None,
     });
     ack.metadata_mut()
@@ -620,12 +647,19 @@ async fn a_refresh_key_survives_a_master_restart() -> TestResult {
         .ack_config(ack)
         .await
         .expect("the refresh key survives a master restart");
-    let row = master
+    let view = master
         .db
-        .process(FindServerById { id: canvas.server })
+        .process(FindServerConfigView {
+            server: canvas.server.clone(),
+        })
         .await?
         .unwrap();
-    assert_eq!(row.applied_revision, row.desired_revision);
+    assert_eq!(
+        view.applied.as_ref().map(|s| s.revision),
+        Some(revision),
+        "the acked revision is what the server is recorded as running"
+    );
+    drop(stream);
 
     restart.cancel();
     Ok(())

@@ -1,6 +1,11 @@
 BEGIN TRANSACTION;
 LET $servers = (SELECT VALUE id FROM orchestration_server WHERE canvas = $id);
-DELETE orchestration_server_config_revision WHERE server IN $servers;
+LET $nodes = (SELECT VALUE id FROM orchestration_node WHERE canvas = $id);
+LET $ports = (SELECT VALUE id FROM orchestration_port WHERE owner IN $nodes);
+DELETE orchestration_edge_connection WHERE in IN $ports OR out IN $ports;
+DELETE orchestration_port WHERE id IN $ports;
+DELETE orchestration_node WHERE id IN $nodes;
+DELETE orchestration_server_config_view WHERE server IN $servers;
 DELETE server_ip_record WHERE server IN $servers;
 DELETE orchestration_server WHERE id IN $servers;
 DELETE $id;

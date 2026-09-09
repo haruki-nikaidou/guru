@@ -12,6 +12,7 @@ use crate::entities::surreal::node::{
 };
 use crate::entities::surreal::port::{PortDirection, PortEntity, PortKind};
 use crate::entities::surreal::server::{ServerIpRecordEntity, ServerIpv6Resolve, ServerWithIp};
+use crate::entities::surreal::view::{ConfigSnapshot, ListenProtocol, ListenerCap};
 use crate::services::canvas::{self, CanvasService};
 use crate::services::edge::{self, EdgeService};
 use crate::services::node::{self, NodeService};
@@ -96,9 +97,6 @@ fn server_to_proto(server: &ServerWithIp) -> pb::Server {
         position: Some(position_to_proto(server.server.position)),
         ipv6_resolve: ipv6_to_proto(server.server.ipv6_resolve),
         log_level: server.server.log_level.clone(),
-        desired_revision: server.server.desired_revision,
-        applied_revision: server.server.applied_revision,
-        last_apply_error: server.server.last_apply_error.clone().unwrap_or_default(),
         last_seen_at: server
             .server
             .last_seen_at
@@ -282,14 +280,6 @@ fn node_row_to_proto(node: &NodeEntity, ports: &[PortEntity]) -> pb::Node {
         comment: node.comment.clone(),
         spec: Some(spec_to_proto(&node.spec)),
         position: Some(position_to_proto(node.position)),
-        created_rev: node.created_rev,
-        retired_rev: node.retired_rev.unwrap_or_default(),
-        retiring: node.retired_rev.is_some(),
-        replaces_id: node
-            .replaces
-            .as_ref()
-            .map(|r| ids::record_key(&r.0))
-            .unwrap_or_default(),
         ports: ports.iter().map(port_to_proto).collect(),
     }
 }
@@ -303,9 +293,35 @@ fn edge_to_proto(edge: &EdgeConnectionEntity) -> pb::Edge {
         id: ids::record_key(&edge.id.0),
         source_port_id: ids::record_key(&edge.source.0),
         target_port_id: ids::record_key(&edge.target.0),
-        created_rev: edge.created_rev,
-        retired_rev: edge.retired_rev.unwrap_or_default(),
-        retiring: edge.retired_rev.is_some(),
+    }
+}
+
+fn listener_cap_to_proto(cap: &ListenerCap) -> pb::ListenerCap {
+    pb::ListenerCap {
+        ip: cap.ip.clone(),
+        port: u32::try_from(cap.port).unwrap_or_default(),
+        protocol: match cap.protocol {
+            ListenProtocol::Raw => "raw",
+            ListenProtocol::RelayTcp => "relay_tcp",
+            ListenProtocol::RelayTls => "relay_tls",
+            ListenProtocol::RelayQuic => "relay_quic",
+        }
+        .to_string(),
+    }
+}
+
+fn snapshot_to_proto(snapshot: &ConfigSnapshot) -> pb::ConfigSnapshot {
+    pb::ConfigSnapshot {
+        revision: snapshot.revision,
+        created_at: snapshot.created_at.to_rfc3339(),
+        forwardings: snapshot
+            .forwardings
+            .iter()
+            .map(|deps| pb::ForwardingDeps {
+                serves: Some(listener_cap_to_proto(&deps.serves)),
+                points_at: deps.points_at.iter().map(listener_cap_to_proto).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -756,21 +772,36 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
             })
             .await?;
         Ok(Response::new(pb::GetServerRolloutStatusReply {
-            desired_revision: status.desired_revision,
-            applied_revision: status.applied_revision,
-            last_apply_error: status.last_apply_error.unwrap_or_default(),
+            desired: status.desired.as_ref().map(snapshot_to_proto),
+            in_flight: status.in_flight.as_ref().map(snapshot_to_proto),
+            applied: status.applied.as_ref().map(snapshot_to_proto),
+            apply_error: status.apply_error.unwrap_or_default(),
+            derive_error: status.derive_error.unwrap_or_default(),
+            waiting_for_server_ids: status
+                .waiting_for
+                .iter()
+                .map(|id| ids::record_key(&id.0))
+                .collect(),
+            derivation_pending: status.derivation_pending,
             last_seen_at: status
                 .last_seen_at
                 .map(|t| t.to_rfc3339())
                 .unwrap_or_default(),
-            retained: status
-                .retained
-                .iter()
-                .map(|row| pb::RetainedRevision {
-                    revision: row.revision,
-                    created_at: row.created_at.to_rfc3339(),
-                })
-                .collect(),
         }))
+    }
+
+    async fn forget_server_applied(
+        &self,
+        request: Request<pb::ForgetServerAppliedRequest>,
+    ) -> Result<Response<pb::ForgetServerAppliedReply>, Status> {
+        let actor = auth::rpc::middleware::from_request(&request)?;
+        let input = request.into_inner();
+        self.rollout
+            .process(rollout::ForgetServerApplied {
+                actor,
+                server: ids::server_id(&input.server_id),
+            })
+            .await?;
+        Ok(Response::new(pb::ForgetServerAppliedReply {}))
     }
 }

@@ -91,9 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Derive one server's worker config from the live canvas, exactly as
-/// `GetServerConfig` does, and print it. No identity is involved: the CLI already
-/// authenticates against the database itself.
+/// Derive one server's *ideal* worker config from the live canvas and print it.
+/// No identity is involved: the CLI already authenticates against the database
+/// itself. This is the config the canvas asks for, before convergence trims it to
+/// what the rest of the fabric can support today.
 async fn export_config(
     db: SurrealProcessor,
     server: String,
@@ -114,7 +115,7 @@ async fn export_config(
         )
         .await?;
     let derived = orchestration::services::derive::derive_server_config(&topology, &server_id)?;
-    print!("{}", derived.toml);
+    print!("{}", derived.config.to_toml_string()?);
     Ok(())
 }
 

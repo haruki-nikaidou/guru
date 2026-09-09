@@ -11,20 +11,30 @@
 //!   query in [`entities::surreal`], and Redis key/value types in
 //!   [`entities::redis`].
 //! - [`services`] — business logic: canvas/server/node/edge CRUD, the topology
-//!   checker, the config deriver, rollout stamping and the worker agent.
+//!   checker, the config deriver, convergence and the worker agent.
 //! - [`rpc`] — the transport edge: the operator `Orchestration` service and the
 //!   `WorkerAgent` service workers talk to, plus their middleware.
 //! - [`events`] — AMQP payloads this module publishes or consumes.
-//! - [`hooks`] — background reactors, notably the RCU garbage collector.
+//! - [`hooks`] — background reactors, notably the derivation hook and its sweep.
 //! - [`config`] — typed module configuration.
 //! - [`utils`] — record-id conversion helpers shared by the edge.
 //!
-//! ## RCU
+//! ## How a change reaches a worker
 //!
-//! Nodes and edges are never mutated in place: a spec change writes a replacement
-//! row and stamps the old one with the global revision that retired it. A retired
-//! row is deleted only once no retained `orchestration_server_config_revision`
-//! references it, i.e. once every server that ran it has moved on.
+//! Rows are edited in place. What a worker runs lives in one
+//! `orchestration_server_config_view` row per server, holding three immutable
+//! snapshots: `desired` (latest derivation), `in_flight` (handed to the worker,
+//! not yet acked) and `applied` (what it runs).
+//!
+//! 1. A mutation bumps `orchestration_canvas.generation` in its own transaction
+//!    and publishes `CanvasDirty`.
+//! 2. [`hooks::derive`] re-derives the whole canvas and commits only while the
+//!    generation still matches; a cron sweep catches anything the message missed.
+//! 3. Derivation is convergent, not sequenced: a server switches a destination
+//!    only once the target's `applied` snapshot serves it, and keeps serving a
+//!    listener for as long as any snapshot still points at it.
+//! 4. A worker stream promotes `desired` to `in_flight` with one conditional
+//!    update, and `AckConfig` promotes `in_flight` to `applied`.
 
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]

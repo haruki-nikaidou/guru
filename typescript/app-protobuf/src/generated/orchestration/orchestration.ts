@@ -538,7 +538,6 @@ export interface Port {
   position: bigint;
 }
 
-/** `retiring` is true while the row is retired but not yet garbage-collected. */
 export interface Node {
   id: string;
   canvasId: string;
@@ -546,10 +545,6 @@ export interface Node {
   comment: string;
   spec: NodeSpec | undefined;
   position: CanvasUiPosition | undefined;
-  createdRev: bigint;
-  retiredRev: bigint;
-  retiring: boolean;
-  replacesId: string;
   ports: Port[];
 }
 
@@ -557,9 +552,6 @@ export interface Edge {
   id: string;
   sourcePortId: string;
   targetPortId: string;
-  createdRev: bigint;
-  retiredRev: bigint;
-  retiring: boolean;
 }
 
 export interface ServerIp {
@@ -578,9 +570,6 @@ export interface Server {
   position: CanvasUiPosition | undefined;
   ipv6Resolve: Ipv6Resolve;
   logLevel: string;
-  desiredRevision: bigint;
-  appliedRevision: bigint;
-  lastApplyError: string;
   lastSeenAt: string;
   ips: ServerIp[];
 }
@@ -600,9 +589,25 @@ export interface Problem {
   portIds: string[];
 }
 
-export interface RetainedRevision {
+/**
+ * A listener a server serves, or that another server points at.
+ * `protocol` is one of `raw`, `relay_tcp`, `relay_tls`, `relay_quic`.
+ */
+export interface ListenerCap {
+  ip: string;
+  port: number;
+  protocol: string;
+}
+
+export interface ForwardingDeps {
+  serves: ListenerCap | undefined;
+  pointsAt: ListenerCap[];
+}
+
+export interface ConfigSnapshot {
   revision: bigint;
   createdAt: string;
+  forwardings: ForwardingDeps[];
 }
 
 export interface CreateCanvasRequest {
@@ -800,12 +805,30 @@ export interface GetServerRolloutStatusRequest {
   serverId: string;
 }
 
+/**
+ * `waiting_for_server_ids` are servers whose applied config does not yet serve a
+ * listener this server's ideal config points at.
+ */
 export interface GetServerRolloutStatusReply {
-  desiredRevision: bigint;
-  appliedRevision: bigint;
-  lastApplyError: string;
+  desired: ConfigSnapshot | undefined;
+  inFlight: ConfigSnapshot | undefined;
+  applied: ConfigSnapshot | undefined;
+  applyError: string;
+  deriveError: string;
+  waitingForServerIds: string[];
+  derivationPending: boolean;
   lastSeenAt: string;
-  retained: RetainedRevision[];
+}
+
+/**
+ * Admin only: declares a server dead, which lets its dependants switch away from
+ * listeners it may in fact still be serving.
+ */
+export interface ForgetServerAppliedRequest {
+  serverId: string;
+}
+
+export interface ForgetServerAppliedReply {
 }
 
 function createBaseCanvasUiPosition(): CanvasUiPosition {
@@ -1948,19 +1971,7 @@ export const Port: MessageFns<Port> = {
 };
 
 function createBaseNode(): Node {
-  return {
-    id: "",
-    canvasId: "",
-    name: "",
-    comment: "",
-    spec: undefined,
-    position: undefined,
-    createdRev: 0n,
-    retiredRev: 0n,
-    retiring: false,
-    replacesId: "",
-    ports: [],
-  };
+  return { id: "", canvasId: "", name: "", comment: "", spec: undefined, position: undefined, ports: [] };
 }
 
 export const Node: MessageFns<Node> = {
@@ -1983,26 +1994,8 @@ export const Node: MessageFns<Node> = {
     if (message.position !== undefined) {
       CanvasUiPosition.encode(message.position, writer.uint32(50).fork()).join();
     }
-    if (message.createdRev !== 0n) {
-      if (BigInt.asIntN(64, message.createdRev) !== message.createdRev) {
-        throw new globalThis.Error("value provided for field message.createdRev of type int64 too large");
-      }
-      writer.uint32(56).int64(message.createdRev);
-    }
-    if (message.retiredRev !== 0n) {
-      if (BigInt.asIntN(64, message.retiredRev) !== message.retiredRev) {
-        throw new globalThis.Error("value provided for field message.retiredRev of type int64 too large");
-      }
-      writer.uint32(64).int64(message.retiredRev);
-    }
-    if (message.retiring !== false) {
-      writer.uint32(72).bool(message.retiring);
-    }
-    if (message.replacesId !== "") {
-      writer.uint32(82).string(message.replacesId);
-    }
     for (const v of message.ports) {
-      Port.encode(v!, writer.uint32(90).fork()).join();
+      Port.encode(v!, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -2063,39 +2056,7 @@ export const Node: MessageFns<Node> = {
           continue;
         }
         case 7: {
-          if (tag !== 56) {
-            break;
-          }
-
-          message.createdRev = reader.int64() as bigint;
-          continue;
-        }
-        case 8: {
-          if (tag !== 64) {
-            break;
-          }
-
-          message.retiredRev = reader.int64() as bigint;
-          continue;
-        }
-        case 9: {
-          if (tag !== 72) {
-            break;
-          }
-
-          message.retiring = reader.bool();
-          continue;
-        }
-        case 10: {
-          if (tag !== 82) {
-            break;
-          }
-
-          message.replacesId = reader.string();
-          continue;
-        }
-        case 11: {
-          if (tag !== 90) {
+          if (tag !== 58) {
             break;
           }
 
@@ -2123,25 +2084,7 @@ export const Node: MessageFns<Node> = {
       comment: isSet(object.comment) ? globalThis.String(object.comment) : "",
       spec: isSet(object.spec) ? NodeSpec.fromJSON(object.spec) : undefined,
       position: isSet(object.position) ? CanvasUiPosition.fromJSON(object.position) : undefined,
-      createdRev: isSet(object.createdRev)
-        ? BigInt(object.createdRev)
-        : isSet(object.created_rev)
-        ? BigInt(object.created_rev)
-        : 0n,
-      retiredRev: isSet(object.retiredRev)
-        ? BigInt(object.retiredRev)
-        : isSet(object.retired_rev)
-        ? BigInt(object.retired_rev)
-        : 0n,
-      retiring: isSet(object.retiring) ? globalThis.Boolean(object.retiring) : false,
-      replacesId: isSet(object.replacesId)
-        ? globalThis.String(object.replacesId)
-        : isSet(object.replaces_id)
-        ? globalThis.String(object.replaces_id)
-        : "",
-      ports: globalThis.Array.isArray(object?.ports)
-        ? object.ports.map((e: any) => Port.fromJSON(e))
-        : [],
+      ports: globalThis.Array.isArray(object?.ports) ? object.ports.map((e: any) => Port.fromJSON(e)) : [],
     };
   },
 
@@ -2165,18 +2108,6 @@ export const Node: MessageFns<Node> = {
     if (message.position !== undefined) {
       obj.position = CanvasUiPosition.toJSON(message.position);
     }
-    if (message.createdRev !== 0n) {
-      obj.createdRev = message.createdRev.toString();
-    }
-    if (message.retiredRev !== 0n) {
-      obj.retiredRev = message.retiredRev.toString();
-    }
-    if (message.retiring !== false) {
-      obj.retiring = message.retiring;
-    }
-    if (message.replacesId !== "") {
-      obj.replacesId = message.replacesId;
-    }
     if (message.ports?.length) {
       obj.ports = message.ports.map((e) => Port.toJSON(e));
     }
@@ -2196,21 +2127,13 @@ export const Node: MessageFns<Node> = {
     message.position = (object.position !== undefined && object.position !== null)
       ? CanvasUiPosition.fromPartial(object.position)
       : undefined;
-    message.createdRev = (object.createdRev !== undefined && object.createdRev !== null)
-      ? BigInt(object.createdRev)
-      : 0n;
-    message.retiredRev = (object.retiredRev !== undefined && object.retiredRev !== null)
-      ? BigInt(object.retiredRev)
-      : 0n;
-    message.retiring = object.retiring ?? false;
-    message.replacesId = object.replacesId ?? "";
     message.ports = object.ports?.map((e) => Port.fromPartial(e)) || [];
     return message;
   },
 };
 
 function createBaseEdge(): Edge {
-  return { id: "", sourcePortId: "", targetPortId: "", createdRev: 0n, retiredRev: 0n, retiring: false };
+  return { id: "", sourcePortId: "", targetPortId: "" };
 }
 
 export const Edge: MessageFns<Edge> = {
@@ -2223,21 +2146,6 @@ export const Edge: MessageFns<Edge> = {
     }
     if (message.targetPortId !== "") {
       writer.uint32(26).string(message.targetPortId);
-    }
-    if (message.createdRev !== 0n) {
-      if (BigInt.asIntN(64, message.createdRev) !== message.createdRev) {
-        throw new globalThis.Error("value provided for field message.createdRev of type int64 too large");
-      }
-      writer.uint32(32).int64(message.createdRev);
-    }
-    if (message.retiredRev !== 0n) {
-      if (BigInt.asIntN(64, message.retiredRev) !== message.retiredRev) {
-        throw new globalThis.Error("value provided for field message.retiredRev of type int64 too large");
-      }
-      writer.uint32(40).int64(message.retiredRev);
-    }
-    if (message.retiring !== false) {
-      writer.uint32(48).bool(message.retiring);
     }
     return writer;
   },
@@ -2273,30 +2181,6 @@ export const Edge: MessageFns<Edge> = {
           message.targetPortId = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.createdRev = reader.int64() as bigint;
-          continue;
-        }
-        case 5: {
-          if (tag !== 40) {
-            break;
-          }
-
-          message.retiredRev = reader.int64() as bigint;
-          continue;
-        }
-        case 6: {
-          if (tag !== 48) {
-            break;
-          }
-
-          message.retiring = reader.bool();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2319,17 +2203,6 @@ export const Edge: MessageFns<Edge> = {
         : isSet(object.target_port_id)
         ? globalThis.String(object.target_port_id)
         : "",
-      createdRev: isSet(object.createdRev)
-        ? BigInt(object.createdRev)
-        : isSet(object.created_rev)
-        ? BigInt(object.created_rev)
-        : 0n,
-      retiredRev: isSet(object.retiredRev)
-        ? BigInt(object.retiredRev)
-        : isSet(object.retired_rev)
-        ? BigInt(object.retired_rev)
-        : 0n,
-      retiring: isSet(object.retiring) ? globalThis.Boolean(object.retiring) : false,
     };
   },
 
@@ -2344,15 +2217,6 @@ export const Edge: MessageFns<Edge> = {
     if (message.targetPortId !== "") {
       obj.targetPortId = message.targetPortId;
     }
-    if (message.createdRev !== 0n) {
-      obj.createdRev = message.createdRev.toString();
-    }
-    if (message.retiredRev !== 0n) {
-      obj.retiredRev = message.retiredRev.toString();
-    }
-    if (message.retiring !== false) {
-      obj.retiring = message.retiring;
-    }
     return obj;
   },
 
@@ -2364,13 +2228,6 @@ export const Edge: MessageFns<Edge> = {
     message.id = object.id ?? "";
     message.sourcePortId = object.sourcePortId ?? "";
     message.targetPortId = object.targetPortId ?? "";
-    message.createdRev = (object.createdRev !== undefined && object.createdRev !== null)
-      ? BigInt(object.createdRev)
-      : 0n;
-    message.retiredRev = (object.retiredRev !== undefined && object.retiredRev !== null)
-      ? BigInt(object.retiredRev)
-      : 0n;
-    message.retiring = object.retiring ?? false;
     return message;
   },
 };
@@ -2497,9 +2354,6 @@ function createBaseServer(): Server {
     position: undefined,
     ipv6Resolve: 0,
     logLevel: "",
-    desiredRevision: 0n,
-    appliedRevision: 0n,
-    lastApplyError: "",
     lastSeenAt: "",
     ips: [],
   };
@@ -2531,26 +2385,11 @@ export const Server: MessageFns<Server> = {
     if (message.logLevel !== "") {
       writer.uint32(66).string(message.logLevel);
     }
-    if (message.desiredRevision !== 0n) {
-      if (BigInt.asIntN(64, message.desiredRevision) !== message.desiredRevision) {
-        throw new globalThis.Error("value provided for field message.desiredRevision of type int64 too large");
-      }
-      writer.uint32(72).int64(message.desiredRevision);
-    }
-    if (message.appliedRevision !== 0n) {
-      if (BigInt.asIntN(64, message.appliedRevision) !== message.appliedRevision) {
-        throw new globalThis.Error("value provided for field message.appliedRevision of type int64 too large");
-      }
-      writer.uint32(80).int64(message.appliedRevision);
-    }
-    if (message.lastApplyError !== "") {
-      writer.uint32(90).string(message.lastApplyError);
-    }
     if (message.lastSeenAt !== "") {
-      writer.uint32(98).string(message.lastSeenAt);
+      writer.uint32(74).string(message.lastSeenAt);
     }
     for (const v of message.ips) {
-      ServerIp.encode(v!, writer.uint32(106).fork()).join();
+      ServerIp.encode(v!, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -2627,39 +2466,15 @@ export const Server: MessageFns<Server> = {
           continue;
         }
         case 9: {
-          if (tag !== 72) {
-            break;
-          }
-
-          message.desiredRevision = reader.int64() as bigint;
-          continue;
-        }
-        case 10: {
-          if (tag !== 80) {
-            break;
-          }
-
-          message.appliedRevision = reader.int64() as bigint;
-          continue;
-        }
-        case 11: {
-          if (tag !== 90) {
-            break;
-          }
-
-          message.lastApplyError = reader.string();
-          continue;
-        }
-        case 12: {
-          if (tag !== 98) {
+          if (tag !== 74) {
             break;
           }
 
           message.lastSeenAt = reader.string();
           continue;
         }
-        case 13: {
-          if (tag !== 106) {
+        case 10: {
+          if (tag !== 82) {
             break;
           }
 
@@ -2696,21 +2511,6 @@ export const Server: MessageFns<Server> = {
         ? globalThis.String(object.logLevel)
         : isSet(object.log_level)
         ? globalThis.String(object.log_level)
-        : "",
-      desiredRevision: isSet(object.desiredRevision)
-        ? BigInt(object.desiredRevision)
-        : isSet(object.desired_revision)
-        ? BigInt(object.desired_revision)
-        : 0n,
-      appliedRevision: isSet(object.appliedRevision)
-        ? BigInt(object.appliedRevision)
-        : isSet(object.applied_revision)
-        ? BigInt(object.applied_revision)
-        : 0n,
-      lastApplyError: isSet(object.lastApplyError)
-        ? globalThis.String(object.lastApplyError)
-        : isSet(object.last_apply_error)
-        ? globalThis.String(object.last_apply_error)
         : "",
       lastSeenAt: isSet(object.lastSeenAt)
         ? globalThis.String(object.lastSeenAt)
@@ -2749,15 +2549,6 @@ export const Server: MessageFns<Server> = {
     if (message.logLevel !== "") {
       obj.logLevel = message.logLevel;
     }
-    if (message.desiredRevision !== 0n) {
-      obj.desiredRevision = message.desiredRevision.toString();
-    }
-    if (message.appliedRevision !== 0n) {
-      obj.appliedRevision = message.appliedRevision.toString();
-    }
-    if (message.lastApplyError !== "") {
-      obj.lastApplyError = message.lastApplyError;
-    }
     if (message.lastSeenAt !== "") {
       obj.lastSeenAt = message.lastSeenAt;
     }
@@ -2782,13 +2573,6 @@ export const Server: MessageFns<Server> = {
       : undefined;
     message.ipv6Resolve = object.ipv6Resolve ?? 0;
     message.logLevel = object.logLevel ?? "";
-    message.desiredRevision = (object.desiredRevision !== undefined && object.desiredRevision !== null)
-      ? BigInt(object.desiredRevision)
-      : 0n;
-    message.appliedRevision = (object.appliedRevision !== undefined && object.appliedRevision !== null)
-      ? BigInt(object.appliedRevision)
-      : 0n;
-    message.lastApplyError = object.lastApplyError ?? "";
     message.lastSeenAt = object.lastSeenAt ?? "";
     message.ips = object.ips?.map((e) => ServerIp.fromPartial(e)) || [];
     return message;
@@ -3039,12 +2823,186 @@ export const Problem: MessageFns<Problem> = {
   },
 };
 
-function createBaseRetainedRevision(): RetainedRevision {
-  return { revision: 0n, createdAt: "" };
+function createBaseListenerCap(): ListenerCap {
+  return { ip: "", port: 0, protocol: "" };
 }
 
-export const RetainedRevision: MessageFns<RetainedRevision> = {
-  encode(message: RetainedRevision, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const ListenerCap: MessageFns<ListenerCap> = {
+  encode(message: ListenerCap, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.ip !== "") {
+      writer.uint32(10).string(message.ip);
+    }
+    if (message.port !== 0) {
+      writer.uint32(16).uint32(message.port);
+    }
+    if (message.protocol !== "") {
+      writer.uint32(26).string(message.protocol);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListenerCap {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseListenerCap();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.ip = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.port = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.protocol = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ListenerCap {
+    return {
+      ip: isSet(object.ip) ? globalThis.String(object.ip) : "",
+      port: isSet(object.port) ? globalThis.Number(object.port) : 0,
+      protocol: isSet(object.protocol) ? globalThis.String(object.protocol) : "",
+    };
+  },
+
+  toJSON(message: ListenerCap): unknown {
+    const obj: any = {};
+    if (message.ip !== "") {
+      obj.ip = message.ip;
+    }
+    if (message.port !== 0) {
+      obj.port = Math.round(message.port);
+    }
+    if (message.protocol !== "") {
+      obj.protocol = message.protocol;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<ListenerCap>): ListenerCap {
+    return ListenerCap.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<ListenerCap>): ListenerCap {
+    const message = createBaseListenerCap();
+    message.ip = object.ip ?? "";
+    message.port = object.port ?? 0;
+    message.protocol = object.protocol ?? "";
+    return message;
+  },
+};
+
+function createBaseForwardingDeps(): ForwardingDeps {
+  return { serves: undefined, pointsAt: [] };
+}
+
+export const ForwardingDeps: MessageFns<ForwardingDeps> = {
+  encode(message: ForwardingDeps, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.serves !== undefined) {
+      ListenerCap.encode(message.serves, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.pointsAt) {
+      ListenerCap.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ForwardingDeps {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseForwardingDeps();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.serves = ListenerCap.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.pointsAt.push(ListenerCap.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ForwardingDeps {
+    return {
+      serves: isSet(object.serves) ? ListenerCap.fromJSON(object.serves) : undefined,
+      pointsAt: globalThis.Array.isArray(object?.pointsAt)
+        ? object.pointsAt.map((e: any) => ListenerCap.fromJSON(e))
+        : globalThis.Array.isArray(object?.points_at)
+        ? object.points_at.map((e: any) => ListenerCap.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: ForwardingDeps): unknown {
+    const obj: any = {};
+    if (message.serves !== undefined) {
+      obj.serves = ListenerCap.toJSON(message.serves);
+    }
+    if (message.pointsAt?.length) {
+      obj.pointsAt = message.pointsAt.map((e) => ListenerCap.toJSON(e));
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<ForwardingDeps>): ForwardingDeps {
+    return ForwardingDeps.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<ForwardingDeps>): ForwardingDeps {
+    const message = createBaseForwardingDeps();
+    message.serves = (object.serves !== undefined && object.serves !== null)
+      ? ListenerCap.fromPartial(object.serves)
+      : undefined;
+    message.pointsAt = object.pointsAt?.map((e) => ListenerCap.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseConfigSnapshot(): ConfigSnapshot {
+  return { revision: 0n, createdAt: "", forwardings: [] };
+}
+
+export const ConfigSnapshot: MessageFns<ConfigSnapshot> = {
+  encode(message: ConfigSnapshot, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.revision !== 0n) {
       if (BigInt.asIntN(64, message.revision) !== message.revision) {
         throw new globalThis.Error("value provided for field message.revision of type int64 too large");
@@ -3054,13 +3012,16 @@ export const RetainedRevision: MessageFns<RetainedRevision> = {
     if (message.createdAt !== "") {
       writer.uint32(18).string(message.createdAt);
     }
+    for (const v of message.forwardings) {
+      ForwardingDeps.encode(v!, writer.uint32(26).fork()).join();
+    }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RetainedRevision {
+  decode(input: BinaryReader | Uint8Array, length?: number): ConfigSnapshot {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRetainedRevision();
+    const message = createBaseConfigSnapshot();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -3080,6 +3041,14 @@ export const RetainedRevision: MessageFns<RetainedRevision> = {
           message.createdAt = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.forwardings.push(ForwardingDeps.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3089,7 +3058,7 @@ export const RetainedRevision: MessageFns<RetainedRevision> = {
     return message;
   },
 
-  fromJSON(object: any): RetainedRevision {
+  fromJSON(object: any): ConfigSnapshot {
     return {
       revision: isSet(object.revision) ? BigInt(object.revision) : 0n,
       createdAt: isSet(object.createdAt)
@@ -3097,10 +3066,13 @@ export const RetainedRevision: MessageFns<RetainedRevision> = {
         : isSet(object.created_at)
         ? globalThis.String(object.created_at)
         : "",
+      forwardings: globalThis.Array.isArray(object?.forwardings)
+        ? object.forwardings.map((e: any) => ForwardingDeps.fromJSON(e))
+        : [],
     };
   },
 
-  toJSON(message: RetainedRevision): unknown {
+  toJSON(message: ConfigSnapshot): unknown {
     const obj: any = {};
     if (message.revision !== 0n) {
       obj.revision = message.revision.toString();
@@ -3108,16 +3080,20 @@ export const RetainedRevision: MessageFns<RetainedRevision> = {
     if (message.createdAt !== "") {
       obj.createdAt = message.createdAt;
     }
+    if (message.forwardings?.length) {
+      obj.forwardings = message.forwardings.map((e) => ForwardingDeps.toJSON(e));
+    }
     return obj;
   },
 
-  create(base?: DeepPartial<RetainedRevision>): RetainedRevision {
-    return RetainedRevision.fromPartial(base ?? {});
+  create(base?: DeepPartial<ConfigSnapshot>): ConfigSnapshot {
+    return ConfigSnapshot.fromPartial(base ?? {});
   },
-  fromPartial(object: DeepPartial<RetainedRevision>): RetainedRevision {
-    const message = createBaseRetainedRevision();
+  fromPartial(object: DeepPartial<ConfigSnapshot>): ConfigSnapshot {
+    const message = createBaseConfigSnapshot();
     message.revision = (object.revision !== undefined && object.revision !== null) ? BigInt(object.revision) : 0n;
     message.createdAt = object.createdAt ?? "";
+    message.forwardings = object.forwardings?.map((e) => ForwardingDeps.fromPartial(e)) || [];
     return message;
   },
 };
@@ -6173,31 +6149,43 @@ export const GetServerRolloutStatusRequest: MessageFns<GetServerRolloutStatusReq
 };
 
 function createBaseGetServerRolloutStatusReply(): GetServerRolloutStatusReply {
-  return { desiredRevision: 0n, appliedRevision: 0n, lastApplyError: "", lastSeenAt: "", retained: [] };
+  return {
+    desired: undefined,
+    inFlight: undefined,
+    applied: undefined,
+    applyError: "",
+    deriveError: "",
+    waitingForServerIds: [],
+    derivationPending: false,
+    lastSeenAt: "",
+  };
 }
 
 export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply> = {
   encode(message: GetServerRolloutStatusReply, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.desiredRevision !== 0n) {
-      if (BigInt.asIntN(64, message.desiredRevision) !== message.desiredRevision) {
-        throw new globalThis.Error("value provided for field message.desiredRevision of type int64 too large");
-      }
-      writer.uint32(8).int64(message.desiredRevision);
+    if (message.desired !== undefined) {
+      ConfigSnapshot.encode(message.desired, writer.uint32(10).fork()).join();
     }
-    if (message.appliedRevision !== 0n) {
-      if (BigInt.asIntN(64, message.appliedRevision) !== message.appliedRevision) {
-        throw new globalThis.Error("value provided for field message.appliedRevision of type int64 too large");
-      }
-      writer.uint32(16).int64(message.appliedRevision);
+    if (message.inFlight !== undefined) {
+      ConfigSnapshot.encode(message.inFlight, writer.uint32(18).fork()).join();
     }
-    if (message.lastApplyError !== "") {
-      writer.uint32(26).string(message.lastApplyError);
+    if (message.applied !== undefined) {
+      ConfigSnapshot.encode(message.applied, writer.uint32(26).fork()).join();
+    }
+    if (message.applyError !== "") {
+      writer.uint32(34).string(message.applyError);
+    }
+    if (message.deriveError !== "") {
+      writer.uint32(42).string(message.deriveError);
+    }
+    for (const v of message.waitingForServerIds) {
+      writer.uint32(50).string(v!);
+    }
+    if (message.derivationPending !== false) {
+      writer.uint32(56).bool(message.derivationPending);
     }
     if (message.lastSeenAt !== "") {
-      writer.uint32(34).string(message.lastSeenAt);
-    }
-    for (const v of message.retained) {
-      RetainedRevision.encode(v!, writer.uint32(42).fork()).join();
+      writer.uint32(66).string(message.lastSeenAt);
     }
     return writer;
   },
@@ -6210,19 +6198,19 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
       const tag = reader.uint32();
       switch (tag >>> 3) {
         case 1: {
-          if (tag !== 8) {
+          if (tag !== 10) {
             break;
           }
 
-          message.desiredRevision = reader.int64() as bigint;
+          message.desired = ConfigSnapshot.decode(reader, reader.uint32());
           continue;
         }
         case 2: {
-          if (tag !== 16) {
+          if (tag !== 18) {
             break;
           }
 
-          message.appliedRevision = reader.int64() as bigint;
+          message.inFlight = ConfigSnapshot.decode(reader, reader.uint32());
           continue;
         }
         case 3: {
@@ -6230,7 +6218,7 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
             break;
           }
 
-          message.lastApplyError = reader.string();
+          message.applied = ConfigSnapshot.decode(reader, reader.uint32());
           continue;
         }
         case 4: {
@@ -6238,7 +6226,7 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
             break;
           }
 
-          message.lastSeenAt = reader.string();
+          message.applyError = reader.string();
           continue;
         }
         case 5: {
@@ -6246,7 +6234,31 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
             break;
           }
 
-          message.retained.push(RetainedRevision.decode(reader, reader.uint32()));
+          message.deriveError = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.waitingForServerIds.push(reader.string());
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.derivationPending = reader.bool();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.lastSeenAt = reader.string();
           continue;
         }
       }
@@ -6260,48 +6272,66 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
 
   fromJSON(object: any): GetServerRolloutStatusReply {
     return {
-      desiredRevision: isSet(object.desiredRevision)
-        ? BigInt(object.desiredRevision)
-        : isSet(object.desired_revision)
-        ? BigInt(object.desired_revision)
-        : 0n,
-      appliedRevision: isSet(object.appliedRevision)
-        ? BigInt(object.appliedRevision)
-        : isSet(object.applied_revision)
-        ? BigInt(object.applied_revision)
-        : 0n,
-      lastApplyError: isSet(object.lastApplyError)
-        ? globalThis.String(object.lastApplyError)
-        : isSet(object.last_apply_error)
-        ? globalThis.String(object.last_apply_error)
+      desired: isSet(object.desired) ? ConfigSnapshot.fromJSON(object.desired) : undefined,
+      inFlight: isSet(object.inFlight)
+        ? ConfigSnapshot.fromJSON(object.inFlight)
+        : isSet(object.in_flight)
+        ? ConfigSnapshot.fromJSON(object.in_flight)
+        : undefined,
+      applied: isSet(object.applied) ? ConfigSnapshot.fromJSON(object.applied) : undefined,
+      applyError: isSet(object.applyError)
+        ? globalThis.String(object.applyError)
+        : isSet(object.apply_error)
+        ? globalThis.String(object.apply_error)
         : "",
+      deriveError: isSet(object.deriveError)
+        ? globalThis.String(object.deriveError)
+        : isSet(object.derive_error)
+        ? globalThis.String(object.derive_error)
+        : "",
+      waitingForServerIds: globalThis.Array.isArray(object?.waitingForServerIds)
+        ? object.waitingForServerIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.waiting_for_server_ids)
+        ? object.waiting_for_server_ids.map((e: any) => globalThis.String(e))
+        : [],
+      derivationPending: isSet(object.derivationPending)
+        ? globalThis.Boolean(object.derivationPending)
+        : isSet(object.derivation_pending)
+        ? globalThis.Boolean(object.derivation_pending)
+        : false,
       lastSeenAt: isSet(object.lastSeenAt)
         ? globalThis.String(object.lastSeenAt)
         : isSet(object.last_seen_at)
         ? globalThis.String(object.last_seen_at)
         : "",
-      retained: globalThis.Array.isArray(object?.retained)
-        ? object.retained.map((e: any) => RetainedRevision.fromJSON(e))
-        : [],
     };
   },
 
   toJSON(message: GetServerRolloutStatusReply): unknown {
     const obj: any = {};
-    if (message.desiredRevision !== 0n) {
-      obj.desiredRevision = message.desiredRevision.toString();
+    if (message.desired !== undefined) {
+      obj.desired = ConfigSnapshot.toJSON(message.desired);
     }
-    if (message.appliedRevision !== 0n) {
-      obj.appliedRevision = message.appliedRevision.toString();
+    if (message.inFlight !== undefined) {
+      obj.inFlight = ConfigSnapshot.toJSON(message.inFlight);
     }
-    if (message.lastApplyError !== "") {
-      obj.lastApplyError = message.lastApplyError;
+    if (message.applied !== undefined) {
+      obj.applied = ConfigSnapshot.toJSON(message.applied);
+    }
+    if (message.applyError !== "") {
+      obj.applyError = message.applyError;
+    }
+    if (message.deriveError !== "") {
+      obj.deriveError = message.deriveError;
+    }
+    if (message.waitingForServerIds?.length) {
+      obj.waitingForServerIds = message.waitingForServerIds;
+    }
+    if (message.derivationPending !== false) {
+      obj.derivationPending = message.derivationPending;
     }
     if (message.lastSeenAt !== "") {
       obj.lastSeenAt = message.lastSeenAt;
-    }
-    if (message.retained?.length) {
-      obj.retained = message.retained.map((e) => RetainedRevision.toJSON(e));
     }
     return obj;
   },
@@ -6311,15 +6341,127 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
   },
   fromPartial(object: DeepPartial<GetServerRolloutStatusReply>): GetServerRolloutStatusReply {
     const message = createBaseGetServerRolloutStatusReply();
-    message.desiredRevision = (object.desiredRevision !== undefined && object.desiredRevision !== null)
-      ? BigInt(object.desiredRevision)
-      : 0n;
-    message.appliedRevision = (object.appliedRevision !== undefined && object.appliedRevision !== null)
-      ? BigInt(object.appliedRevision)
-      : 0n;
-    message.lastApplyError = object.lastApplyError ?? "";
+    message.desired = (object.desired !== undefined && object.desired !== null)
+      ? ConfigSnapshot.fromPartial(object.desired)
+      : undefined;
+    message.inFlight = (object.inFlight !== undefined && object.inFlight !== null)
+      ? ConfigSnapshot.fromPartial(object.inFlight)
+      : undefined;
+    message.applied = (object.applied !== undefined && object.applied !== null)
+      ? ConfigSnapshot.fromPartial(object.applied)
+      : undefined;
+    message.applyError = object.applyError ?? "";
+    message.deriveError = object.deriveError ?? "";
+    message.waitingForServerIds = object.waitingForServerIds?.map((e) => e) || [];
+    message.derivationPending = object.derivationPending ?? false;
     message.lastSeenAt = object.lastSeenAt ?? "";
-    message.retained = object.retained?.map((e) => RetainedRevision.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseForgetServerAppliedRequest(): ForgetServerAppliedRequest {
+  return { serverId: "" };
+}
+
+export const ForgetServerAppliedRequest: MessageFns<ForgetServerAppliedRequest> = {
+  encode(message: ForgetServerAppliedRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.serverId !== "") {
+      writer.uint32(10).string(message.serverId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ForgetServerAppliedRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseForgetServerAppliedRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.serverId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ForgetServerAppliedRequest {
+    return {
+      serverId: isSet(object.serverId)
+        ? globalThis.String(object.serverId)
+        : isSet(object.server_id)
+        ? globalThis.String(object.server_id)
+        : "",
+    };
+  },
+
+  toJSON(message: ForgetServerAppliedRequest): unknown {
+    const obj: any = {};
+    if (message.serverId !== "") {
+      obj.serverId = message.serverId;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<ForgetServerAppliedRequest>): ForgetServerAppliedRequest {
+    return ForgetServerAppliedRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<ForgetServerAppliedRequest>): ForgetServerAppliedRequest {
+    const message = createBaseForgetServerAppliedRequest();
+    message.serverId = object.serverId ?? "";
+    return message;
+  },
+};
+
+function createBaseForgetServerAppliedReply(): ForgetServerAppliedReply {
+  return {};
+}
+
+export const ForgetServerAppliedReply: MessageFns<ForgetServerAppliedReply> = {
+  encode(_: ForgetServerAppliedReply, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ForgetServerAppliedReply {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseForgetServerAppliedReply();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): ForgetServerAppliedReply {
+    return {};
+  },
+
+  toJSON(_: ForgetServerAppliedReply): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create(base?: DeepPartial<ForgetServerAppliedReply>): ForgetServerAppliedReply {
+    return ForgetServerAppliedReply.fromPartial(base ?? {});
+  },
+  fromPartial(_: DeepPartial<ForgetServerAppliedReply>): ForgetServerAppliedReply {
+    const message = createBaseForgetServerAppliedReply();
     return message;
   },
 };
@@ -6509,6 +6651,14 @@ export const OrchestrationDefinition = {
       responseStream: false,
       options: {},
     },
+    forgetServerApplied: {
+      name: "ForgetServerApplied",
+      requestType: ForgetServerAppliedRequest as typeof ForgetServerAppliedRequest,
+      requestStream: false,
+      responseType: ForgetServerAppliedReply as typeof ForgetServerAppliedReply,
+      responseStream: false,
+      options: {},
+    },
   },
 } as const;
 
@@ -6587,6 +6737,10 @@ export interface OrchestrationServiceImplementation<CallContextExt = {}> {
     request: GetServerRolloutStatusRequest,
     context: CallContext & CallContextExt,
   ): Promise<DeepPartial<GetServerRolloutStatusReply>>;
+  forgetServerApplied(
+    request: ForgetServerAppliedRequest,
+    context: CallContext & CallContextExt,
+  ): Promise<DeepPartial<ForgetServerAppliedReply>>;
 }
 
 export interface OrchestrationClient<CallOptionsExt = {}> {
@@ -6664,6 +6818,10 @@ export interface OrchestrationClient<CallOptionsExt = {}> {
     request: DeepPartial<GetServerRolloutStatusRequest>,
     options?: CallOptions & CallOptionsExt,
   ): Promise<GetServerRolloutStatusReply>;
+  forgetServerApplied(
+    request: DeepPartial<ForgetServerAppliedRequest>,
+    options?: CallOptions & CallOptionsExt,
+  ): Promise<ForgetServerAppliedReply>;
 }
 
 type Builtin = Date | Function | Uint8Array | string | number | boolean | bigint | undefined;

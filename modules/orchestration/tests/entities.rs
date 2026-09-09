@@ -10,26 +10,23 @@ use orchestration::entities::surreal::canvas::{
     DeleteCanvasRow, FindCanvasById, ListCanvases, UpdateCanvasMeta,
 };
 use orchestration::entities::surreal::connection::{
-    ConnectPorts, FindEdgeById, FindLiveEdgeByPort, ForceDeleteEdgeRow, ListEdgesByCanvas,
-    ListLiveEdgesByCanvas, RetireEdgeRow,
+    ConnectPorts, DeleteEdgeRow, FindEdgeById, ListEdgesByCanvas,
 };
 use orchestration::entities::surreal::node::{
-    CarryEdge, ExitConfig, FindNodeById, FindNodeWithPorts, ForceDeleteNodeRow, NodeSpec,
-    ReplaceNodeRow, RetireNodeRow, UpdateNodeMetaRow,
-};
-use orchestration::entities::surreal::revision::{
-    CollectRcuGarbage, FindServerConfigRevision, ListRetainedRevisions, NextRevision,
-    PruneServerRevisionsBelow, RecordServerConfigRevision,
+    DeleteNodeRow, ExitConfig, FindNodeById, FindNodeWithPorts, NodeSpec, UpdateNodeMetaRow,
+    UpdateNodeSpecRow,
 };
 use orchestration::entities::surreal::server::{
     ClaimServerWatchSession, DeleteServerIpRow, DeleteServerRow, FindServerById,
-    FindServerByRefreshKeyDigest, FindServerIpById, ListServerIpsByCanvas, ListServerWatchState,
-    ListServersByCanvas, MarkServerApplied, MoveServerPosition, ReleaseServerWatchSession,
-    RenewServerWatchSession, RotateServerRefreshKey, ServerIpv6Resolve, SetServerApplyError,
-    SetServerDesiredRevision, UpdateServerSettings,
+    FindServerByRefreshKeyDigest, FindServerIpById, ListServerIpsByCanvas, ListServersByCanvas,
+    MoveServerPosition, RegisterWorkerSession, ReleaseServerWatchSession, RenewServerWatchSession,
+    ServerIpv6Resolve, UpdateServerSettings,
 };
 use orchestration::entities::surreal::topology::{
     FindCanvasOfServer, LoadCanvasContents, LoadCanvasTopology,
+};
+use orchestration::entities::surreal::view::{
+    AckServerConfig, FindServerConfigView, ListServerWatchState, TakeInFlight,
 };
 
 fn exit_spec(dest: &str) -> NodeSpec {
@@ -65,23 +62,42 @@ async fn canvas_crud_round_trip() -> TestResult {
     server_ip(&sp, &s, "203.0.113.10").await?;
     sp.process(DeleteCanvasRow { id: c.id.clone() }).await?;
     assert!(sp.process(FindCanvasById { id: c.id }).await?.is_none());
+    assert!(
+        sp.process(FindServerConfigView {
+            server: s.id.clone()
+        })
+        .await?
+        .is_none(),
+        "the cascade takes the config view with the server"
+    );
     assert!(sp.process(FindServerById { id: s.id }).await?.is_none());
     Ok(())
 }
 
 #[tokio::test]
-async fn server_lifecycle_and_rollout_columns() -> TestResult {
+async fn creating_a_server_creates_its_empty_config_view() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
-    assert_eq!(s.desired_revision, 0);
-    assert_eq!(s.applied_revision, 0);
     assert_eq!(s.refresh_key_generation, 0);
     assert!(s.last_seen_at.is_none());
+
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .expect("a server is never observable without its config view");
+    assert!(view.desired.is_none());
+    assert!(view.in_flight.is_none());
+    assert!(view.applied.is_none());
+    assert!(view.failed_revision.is_none());
+    assert!(view.waiting_for.is_empty());
 
     let updated = sp
         .process(UpdateServerSettings {
             id: s.id.clone(),
+            canvas: c.id.clone(),
             name: "tokyo-1".to_string(),
             icon: "jp".to_string(),
             comment: "primary".to_string(),
@@ -104,46 +120,45 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
             .position,
         pos(7, 9)
     );
-
-    // Rollout bookkeeping.
-    sp.process(SetServerDesiredRevision {
-        server: s.id.clone(),
-        revision: 4,
-    })
-    .await?;
-    sp.process(SetServerApplyError {
-        server: s.id.clone(),
-        error: "boom".to_string(),
-    })
-    .await?;
-    let row = sp
-        .process(FindServerById { id: s.id.clone() })
+    assert_eq!(
+        sp.process(ListServersByCanvas {
+            canvas: c.id.clone()
+        })
         .await?
-        .unwrap();
-    assert_eq!(row.desired_revision, 4);
-    assert_eq!(row.last_apply_error.as_deref(), Some("boom"));
-    sp.process(MarkServerApplied {
-        server: s.id.clone(),
-        revision: 4,
-    })
-    .await?;
-    let row = sp
-        .process(FindServerById { id: s.id.clone() })
+        .len(),
+        1
+    );
+    assert_eq!(
+        sp.process(FindCanvasOfServer {
+            server: s.id.clone()
+        })
         .await?
-        .unwrap();
-    assert_eq!(row.applied_revision, 4);
-    assert!(row.last_apply_error.is_none());
+        .unwrap()
+        .0,
+        c.id.0
+    );
+    Ok(())
+}
 
-    // Refresh keys rotate, and lookup is by digest.
+#[tokio::test]
+async fn a_worker_session_is_owned_by_one_registration_at_a_time() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+
     let start = chrono::Utc::now();
     let lease = chrono::TimeDelta::seconds(30);
+    let register = |digest: &str, now: chrono::DateTime<chrono::Utc>| RegisterWorkerSession {
+        server: s.id.clone(),
+        canvas: c.id.clone(),
+        digest: digest.to_string(),
+        now,
+        lease_until: now + lease,
+        running_revision: 0,
+    };
+
     let row = sp
-        .process(RotateServerRefreshKey {
-            server: s.id.clone(),
-            digest: "digest-1".to_string(),
-            now: start,
-            lease_until: start + lease,
-        })
+        .process(register("digest-1", start))
         .await?
         .expect("the first registration takes the free session");
     assert_eq!(row.refresh_key_generation, 1);
@@ -158,12 +173,10 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
 
     // A contender is refused while the session lease is still alive.
     assert!(
-        sp.process(RotateServerRefreshKey {
-            server: s.id.clone(),
-            digest: "digest-contender".to_string(),
-            now: start + chrono::TimeDelta::seconds(5),
-            lease_until: start + chrono::TimeDelta::seconds(35),
-        })
+        sp.process(register(
+            "digest-contender",
+            start + chrono::TimeDelta::seconds(5)
+        ))
         .await?
         .is_none(),
         "a live session must not be stolen by another registration"
@@ -202,12 +215,7 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
 
     // Once the lease lapses the server can be taken over.
     let row = sp
-        .process(RotateServerRefreshKey {
-            server: s.id.clone(),
-            digest: "digest-2".to_string(),
-            now: start + chrono::TimeDelta::seconds(41),
-            lease_until: start + chrono::TimeDelta::seconds(71),
-        })
+        .process(register("digest-2", start + chrono::TimeDelta::seconds(41)))
         .await?
         .expect("a lapsed lease releases the server");
     assert_eq!(row.refresh_key_generation, 2);
@@ -249,12 +257,7 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
     })
     .await?;
     let row = sp
-        .process(RotateServerRefreshKey {
-            server: s.id.clone(),
-            digest: "digest-3".to_string(),
-            now: start + chrono::TimeDelta::seconds(43),
-            lease_until: start + chrono::TimeDelta::seconds(73),
-        })
+        .process(register("digest-3", start + chrono::TimeDelta::seconds(43)))
         .await?
         .expect("a released session lets the next worker register at once");
     assert_eq!(row.refresh_key_generation, 3);
@@ -265,26 +268,229 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
         })
         .await?;
     assert_eq!(watch.len(), 1);
-    assert_eq!(watch[0].desired_revision, 4);
     assert_eq!(watch[0].refresh_key_generation, 3);
     assert_eq!(watch[0].watch_epoch, 1);
+    assert_eq!(watch[0].desired_revision, None);
+    Ok(())
+}
 
-    assert_eq!(
-        sp.process(ListServersByCanvas {
-            canvas: c.id.clone()
+/// Seeds a `desired` snapshot the way a derivation pass would.
+async fn seed_desired(
+    sp: &wakuwaku::surreal::SurrealProcessor,
+    server: &orchestration::entities::surreal::server::ServerId,
+    revision: i64,
+) -> Result<(), surrealdb::Error> {
+    sp.db()
+        .query(
+            "UPDATE orchestration_server_config_view
+                 SET desired = { revision: $revision, toml: $toml, created_at: time::now(), forwardings: [] }
+                 WHERE server = $server",
+        )
+        .bind(("server", server.clone()))
+        .bind(("revision", revision))
+        .bind(("toml", format!("# revision {revision}")))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn take_in_flight_and_ack_move_the_slots() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    seed_desired(&sp, &s.id, 1).await?;
+
+    let taken = sp
+        .process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 0,
+            epoch: 0,
         })
         .await?
-        .len(),
-        1
+        .expect("a fresh desired revision is handed to the stream that asks");
+    assert_eq!(taken.revision, 1);
+    assert!(
+        sp.process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 0,
+            epoch: 0,
+        })
+        .await?
+        .is_none(),
+        "a revision already in flight is never handed out twice"
     );
-    assert_eq!(
-        sp.process(FindCanvasOfServer {
-            server: s.id.clone()
+    assert!(
+        sp.process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 9,
+            epoch: 0,
         })
         .await?
-        .unwrap()
-        .0,
-        c.id.0
+        .is_none(),
+        "a fenced-out session is handed nothing at all"
+    );
+
+    assert!(
+        sp.process(AckServerConfig {
+            server: s.id.clone(),
+            canvas: c.id.clone(),
+            revision: 1,
+            error: None,
+        })
+        .await?
+    );
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .unwrap();
+    assert_eq!(view.applied.map(|s| s.revision), Some(1));
+    assert!(view.in_flight.is_none());
+
+    // A failed apply blocks the revision instead of being retried forever.
+    seed_desired(&sp, &s.id, 2).await?;
+    let taken = sp
+        .process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 0,
+            epoch: 0,
+        })
+        .await?
+        .expect("the next revision is offered once");
+    assert_eq!(taken.revision, 2);
+    assert!(
+        sp.process(AckServerConfig {
+            server: s.id.clone(),
+            canvas: c.id.clone(),
+            revision: 2,
+            error: Some("cannot bind".to_string()),
+        })
+        .await?
+    );
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .unwrap();
+    assert_eq!(view.failed_revision, Some(2));
+    assert_eq!(view.apply_error.as_deref(), Some("cannot bind"));
+    assert_eq!(view.applied.map(|s| s.revision), Some(1));
+    assert!(
+        sp.process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 0,
+            epoch: 0,
+        })
+        .await?
+        .is_none(),
+        "a revision the worker refused is not pushed at it again"
+    );
+
+    assert!(
+        !sp.process(AckServerConfig {
+            server: s.id.clone(),
+            canvas: c.id.clone(),
+            revision: 7,
+            error: None,
+        })
+        .await?,
+        "an ack for a revision that is not in flight changes nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_stream_is_offered_what_the_previous_one_never_acked() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    seed_desired(&sp, &s.id, 1).await?;
+
+    // The first stream is handed the snapshot and then dies without acking.
+    let claimed = sp
+        .process(ClaimServerWatchSession {
+            server: s.id.clone(),
+            generation: 0,
+            now: chrono::Utc::now(),
+            lease_until: chrono::Utc::now() + chrono::TimeDelta::seconds(30),
+        })
+        .await?
+        .unwrap();
+    assert!(
+        sp.process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 0,
+            epoch: claimed.watch_epoch,
+        })
+        .await?
+        .is_some()
+    );
+
+    // Its replacement must not be left waiting for an ack that can never come.
+    let claimed = sp
+        .process(ClaimServerWatchSession {
+            server: s.id.clone(),
+            generation: 0,
+            now: chrono::Utc::now(),
+            lease_until: chrono::Utc::now() + chrono::TimeDelta::seconds(30),
+        })
+        .await?
+        .unwrap();
+    let taken = sp
+        .process(TakeInFlight {
+            server: s.id.clone(),
+            generation: 0,
+            epoch: claimed.watch_epoch,
+        })
+        .await?
+        .expect("the fenced-out session's snapshot is offered to the new one");
+    assert_eq!(taken.revision, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn register_promotes_the_running_revision() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    seed_desired(&sp, &s.id, 3).await?;
+    sp.process(TakeInFlight {
+        server: s.id.clone(),
+        generation: 0,
+        epoch: 0,
+    })
+    .await?
+    .expect("the snapshot is in flight when the worker restarts");
+
+    let now = chrono::Utc::now();
+    sp.process(RegisterWorkerSession {
+        server: s.id.clone(),
+        canvas: c.id.clone(),
+        digest: "digest-1".to_string(),
+        now,
+        lease_until: now + chrono::TimeDelta::seconds(30),
+        running_revision: 3,
+    })
+    .await?
+    .expect("the free session is taken");
+
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .unwrap();
+    assert_eq!(
+        view.applied.map(|s| s.revision),
+        Some(3),
+        "a worker that reports the in-flight revision is running it"
+    );
+    assert!(
+        view.in_flight.is_none(),
+        "registration clears whatever the previous session had in flight"
     );
     Ok(())
 }
@@ -312,10 +518,26 @@ async fn server_ip_records_are_scoped_to_their_canvas() -> TestResult {
             .is_some()
     );
 
-    sp.process(DeleteServerIpRow { id: ip.id.clone() }).await?;
+    sp.process(DeleteServerIpRow {
+        id: ip.id.clone(),
+        canvas: c.id.clone(),
+    })
+    .await?;
     assert!(sp.process(FindServerIpById { id: ip.id }).await?.is_none());
 
-    sp.process(DeleteServerRow { id: s2.id.clone() }).await?;
+    sp.process(DeleteServerRow {
+        id: s2.id.clone(),
+        canvas: other.id.clone(),
+    })
+    .await?;
+    assert!(
+        sp.process(FindServerConfigView {
+            server: s2.id.clone()
+        })
+        .await?
+        .is_none(),
+        "deleting a server deletes its config view"
+    );
     assert!(sp.process(FindServerById { id: s2.id }).await?.is_none());
     assert!(
         sp.process(ListServerIpsByCanvas { canvas: other.id })
@@ -327,27 +549,14 @@ async fn server_ip_records_are_scoped_to_their_canvas() -> TestResult {
 }
 
 #[tokio::test]
-async fn next_revision_is_strictly_increasing() -> TestResult {
-    let sp = setup().await?;
-    let a = sp.process(NextRevision {}).await?;
-    let b = sp.process(NextRevision {}).await?;
-    let c = sp.process(NextRevision {}).await?;
-    assert_eq!(a, 1, "revision 0 is the reserved never-stamped sentinel");
-    assert!(a < b && b < c, "{a} < {b} < {c}");
-    Ok(())
-}
-
-#[tokio::test]
 async fn create_node_writes_node_and_ports_together() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
 
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
+    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
     assert_eq!(pod.ports.len(), 2);
-    assert_eq!(pod.node.created_rev, 1);
-    assert!(pod.node.retired_rev.is_none());
 
     let loaded = sp
         .process(FindNodeWithPorts {
@@ -378,98 +587,29 @@ async fn create_node_writes_node_and_ports_together() -> TestResult {
 }
 
 #[tokio::test]
-async fn retire_node_retires_its_live_edges() -> TestResult {
+async fn deleting_a_node_removes_its_ports_and_edges() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
+    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports()).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
             target: port_of(&pod, "destination"),
-            revision: 1,
+            canvas: c.id.clone(),
         })
         .await?;
-    assert!(edge.retired_rev.is_none());
-    assert_eq!(
-        sp.process(ListLiveEdgesByCanvas {
-            canvas: c.id.clone()
-        })
-        .await?
-        .len(),
-        1
-    );
-    assert!(
-        sp.process(FindLiveEdgeByPort {
-            port: port_of(&pod, "destination")
-        })
-        .await?
-        .is_some()
-    );
-
-    sp.process(RetireNodeRow {
-        id: pod.node.id.clone(),
-        revision: 7,
-    })
-    .await?;
-    assert_eq!(
-        sp.process(FindNodeById {
-            id: pod.node.id.clone()
-        })
+    let before = sp
+        .process(FindCanvasById { id: c.id.clone() })
         .await?
         .unwrap()
-        .retired_rev,
-        Some(7)
-    );
-    assert_eq!(
-        sp.process(FindEdgeById {
-            id: edge.id.clone()
-        })
-        .await?
-        .unwrap()
-        .retired_rev,
-        Some(7),
-        "retiring a node retires every live edge touching its ports"
-    );
-    assert!(
-        sp.process(ListLiveEdgesByCanvas {
-            canvas: c.id.clone()
-        })
-        .await?
-        .is_empty()
-    );
-    assert_eq!(
-        sp.process(ListEdgesByCanvas {
-            canvas: c.id.clone()
-        })
-        .await?
-        .len(),
-        1,
-        "the retiring edge is still visible to the dashboard"
-    );
-    Ok(())
-}
+        .generation;
 
-#[tokio::test]
-async fn force_delete_node_leaves_no_ports_or_edges() -> TestResult {
-    let sp = setup().await?;
-    let c = canvas(&sp, "prod").await?;
-    let s = server(&sp, &c, "tokyo").await?;
-    let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
-    let edge = sp
-        .process(ConnectPorts {
-            source: port_of(&exit, "destination"),
-            target: port_of(&pod, "destination"),
-            revision: 1,
-        })
-        .await?;
-
-    sp.process(ForceDeleteNodeRow {
+    sp.process(DeleteNodeRow {
         id: pod.node.id.clone(),
+        canvas: c.id.clone(),
     })
     .await?;
     assert!(
@@ -478,280 +618,152 @@ async fn force_delete_node_leaves_no_ports_or_edges() -> TestResult {
             .is_none()
     );
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
+    assert!(
+        sp.process(ListEdgesByCanvas {
+            canvas: c.id.clone()
+        })
+        .await?
+        .is_empty()
+    );
     let topology = sp
         .process(LoadCanvasTopology {
             canvas: c.id.clone(),
         })
         .await?;
     assert_eq!(topology.nodes.len(), 1);
-    assert!(topology.edges.is_empty());
     assert_eq!(
         topology.nodes[0].ports.len(),
         1,
         "the deleted node's ports are gone"
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn replace_node_carries_edges_to_the_replacement() -> TestResult {
-    let sp = setup().await?;
-    let c = canvas(&sp, "prod").await?;
-    let s = server(&sp, &c, "tokyo").await?;
-    let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
-    let edge = sp
-        .process(ConnectPorts {
-            source: port_of(&exit, "destination"),
-            target: port_of(&pod, "destination"),
-            revision: 1,
-        })
-        .await?;
-
-    let replacement = sp
-        .process(ReplaceNodeRow {
-            old: pod.node.id.clone(),
-            canvas: c.id.clone(),
-            name: "pod".to_string(),
-            comment: String::new(),
-            spec: pod_spec(&ip, 8443),
-            position: pos(0, 0),
-            revision: 5,
-            ports: pod_ports(),
-            carry: vec![CarryEdge {
-                old_edge: edge.id.clone(),
-                new_port_key: "destination".to_string(),
-                other_port: port_of(&exit, "destination"),
-                new_port_is_source: false,
-            }],
-        })
-        .await?;
-
     assert_eq!(
-        replacement.node.replaces.as_ref().map(|r| r.0.clone()),
-        Some(pod.node.id.0.clone())
-    );
-    assert_eq!(
-        sp.process(FindNodeById {
-            id: pod.node.id.clone()
-        })
-        .await?
-        .unwrap()
-        .retired_rev,
-        Some(5)
-    );
-    assert_eq!(
-        sp.process(FindEdgeById { id: edge.id })
+        sp.process(FindCanvasById { id: c.id })
             .await?
             .unwrap()
-            .retired_rev,
-        Some(5)
+            .generation,
+        before + 1,
+        "the write and the generation bump are one transaction"
     );
-
-    let live = sp
-        .process(ListLiveEdgesByCanvas {
-            canvas: c.id.clone(),
-        })
-        .await?;
-    assert_eq!(live.len(), 1, "exactly one carried edge is live");
-    assert_eq!(live[0].created_rev, 5);
-    assert_eq!(live[0].source.0, port_of(&exit, "destination").0);
-    assert_eq!(live[0].target.0, port_of(&replacement, "destination").0);
-
-    let topology = sp.process(LoadCanvasTopology { canvas: c.id }).await?;
-    assert_eq!(topology.nodes.len(), 2, "only live nodes are in a topology");
     Ok(())
 }
 
 #[tokio::test]
-async fn edges_can_be_retired_and_force_deleted() -> TestResult {
+async fn updating_a_spec_keeps_edges_on_surviving_ports() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
+    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports()).await?;
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
             target: port_of(&pod, "destination"),
-            revision: 1,
+            canvas: c.id.clone(),
         })
         .await?;
 
-    sp.process(RetireEdgeRow {
-        id: edge.id.clone(),
-        revision: 3,
-    })
-    .await?;
+    // Same port keys: the rows survive, so the edge is never touched.
+    let updated = sp
+        .process(UpdateNodeSpecRow {
+            id: pod.node.id.clone(),
+            canvas: c.id.clone(),
+            spec: pod_spec(&ip, 8443),
+            ports: pod_ports(),
+        })
+        .await?;
+    assert_eq!(updated.node.id.0, pod.node.id.0);
+    match &updated.node.spec {
+        NodeSpec::Pod(cfg) => assert_eq!(cfg.port, 8443),
+        other => panic!("expected pod spec, got {other:?}"),
+    }
     assert_eq!(
+        port_of(&updated, "destination").0,
+        port_of(&pod, "destination").0,
+        "a surviving port keeps its identity"
+    );
+    assert!(
         sp.process(FindEdgeById {
             id: edge.id.clone()
         })
         .await?
-        .unwrap()
-        .retired_rev,
-        Some(3)
-    );
-    assert!(
-        sp.process(FindLiveEdgeByPort {
-            port: port_of(&pod, "destination")
-        })
-        .await?
-        .is_none()
+        .is_some(),
+        "and with it the edge attached to it"
     );
 
-    sp.process(ForceDeleteEdgeRow {
-        id: edge.id.clone(),
-    })
-    .await?;
+    // A layout that drops the key takes that port and its edge with it.
+    let narrowed: Vec<_> = pod_ports()
+        .into_iter()
+        .filter(|p| p.key != "destination")
+        .collect();
+    let updated = sp
+        .process(UpdateNodeSpecRow {
+            id: pod.node.id.clone(),
+            canvas: c.id.clone(),
+            spec: pod_spec(&ip, 8443),
+            ports: narrowed,
+        })
+        .await?;
+    assert_eq!(updated.ports.len(), 1);
+    assert!(updated.ports.iter().all(|p| p.key != "destination"));
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
     Ok(())
 }
 
 #[tokio::test]
-async fn revision_rows_prune_below_the_applied_revision() -> TestResult {
-    let sp = setup().await?;
-    let c = canvas(&sp, "prod").await?;
-    let s = server(&sp, &c, "tokyo").await?;
-
-    for revision in [1, 2, 3] {
-        sp.process(RecordServerConfigRevision {
-            server: s.id.clone(),
-            revision,
-            nodes: vec![],
-            edges: vec![],
-            toml: format!("# revision {revision}"),
-        })
-        .await?;
-    }
-    assert_eq!(
-        sp.process(ListRetainedRevisions {
-            server: s.id.clone()
-        })
-        .await?
-        .len(),
-        3
-    );
-
-    sp.process(PruneServerRevisionsBelow {
-        server: s.id.clone(),
-        revision: 2,
-    })
-    .await?;
-    let retained = sp
-        .process(ListRetainedRevisions {
-            server: s.id.clone(),
-        })
-        .await?;
-    assert_eq!(
-        retained.iter().map(|r| r.revision).collect::<Vec<_>>(),
-        vec![2, 3],
-        "the applied revision itself is kept"
-    );
-    assert_eq!(
-        sp.process(FindServerConfigRevision {
-            server: s.id.clone(),
-            revision: 2
-        })
-        .await?
-        .unwrap()
-        .toml,
-        "# revision 2"
-    );
-    assert!(
-        sp.process(FindServerConfigRevision {
-            server: s.id,
-            revision: 1
-        })
-        .await?
-        .is_none()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn gc_keeps_retired_rows_a_retained_revision_still_references() -> TestResult {
+async fn an_edge_write_bumps_the_canvas_generation() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports(), 1).await?;
+    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
+    let exit = node(&sp, &c, "exit", exit_spec("10.0.0.5:8080"), exit_ports()).await?;
+    let before = sp
+        .process(FindCanvasById { id: c.id.clone() })
+        .await?
+        .unwrap()
+        .generation;
+
     let edge = sp
         .process(ConnectPorts {
             source: port_of(&exit, "destination"),
             target: port_of(&pod, "destination"),
-            revision: 1,
+            canvas: c.id.clone(),
         })
         .await?;
-    sp.process(RecordServerConfigRevision {
-        server: s.id.clone(),
-        revision: 1,
-        nodes: vec![pod.node.id.clone(), exit.node.id.clone()],
-        edges: vec![edge.id.clone()],
-        toml: "# running".to_string(),
-    })
-    .await?;
-
-    sp.process(RetireNodeRow {
-        id: pod.node.id.clone(),
-        revision: 2,
-    })
-    .await?;
-
-    let report = sp.process(CollectRcuGarbage {}).await?;
-    assert_eq!(
-        (report.nodes, report.edges),
-        (0, 0),
-        "a revision the server still runs pins the retired rows"
-    );
-    assert!(
-        sp.process(FindNodeById {
-            id: pod.node.id.clone()
-        })
+    let after_connect = sp
+        .process(FindCanvasById { id: c.id.clone() })
         .await?
-        .is_some()
+        .unwrap();
+    assert_eq!(after_connect.generation, before + 1);
+    assert!(
+        after_connect.generation > after_connect.derived_generation,
+        "an edit leaves the canvas visibly underived until a pass catches up"
     );
 
-    // The server moves on: its old revision row is pruned, so nothing pins the rows.
-    sp.process(PruneServerRevisionsBelow {
-        server: s.id.clone(),
-        revision: 2,
+    sp.process(DeleteEdgeRow {
+        id: edge.id.clone(),
+        canvas: c.id.clone(),
     })
     .await?;
-    let report = sp.process(CollectRcuGarbage {}).await?;
-    assert_eq!((report.nodes, report.edges), (1, 1));
-    assert!(
-        sp.process(FindNodeById { id: pod.node.id })
-            .await?
-            .is_none()
-    );
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
-    assert!(
-        sp.process(FindNodeById {
-            id: exit.node.id.clone()
-        })
-        .await?
-        .is_some(),
-        "live nodes are never collected"
+    assert_eq!(
+        sp.process(FindCanvasById { id: c.id })
+            .await?
+            .unwrap()
+            .generation,
+        before + 2
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn canvas_contents_include_retiring_rows() -> TestResult {
+async fn canvas_contents_render_the_whole_canvas() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports(), 1).await?;
-    sp.process(RetireNodeRow {
-        id: pod.node.id,
-        revision: 2,
-    })
-    .await?;
+    node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
 
     let contents = sp
         .process(LoadCanvasContents {
@@ -763,13 +775,9 @@ async fn canvas_contents_include_retiring_rows() -> TestResult {
     assert_eq!(contents.servers.len(), 1);
     assert_eq!(contents.servers[0].ips.len(), 1);
     assert_eq!(contents.nodes.len(), 1);
-    assert_eq!(contents.nodes[0].node.retired_rev, Some(2));
 
     let topology = sp.process(LoadCanvasTopology { canvas: c.id }).await?;
-    assert!(
-        topology.nodes.is_empty(),
-        "a topology only ever sees live rows"
-    );
+    assert_eq!(topology.nodes.len(), 1);
     assert_eq!(topology.ips.len(), 1);
     assert_eq!(topology.servers.len(), 1);
     Ok(())

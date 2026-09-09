@@ -14,33 +14,35 @@ pub struct EdgeConnectionEntity {
     pub source: PortId,
     #[surreal(rename = "out")]
     pub target: PortId,
-    pub created_rev: i64,
-    pub retired_rev: Option<i64>,
 }
 
 #[derive(Debug)]
 pub struct ConnectPorts {
     pub source: PortId,
     pub target: PortId,
-    pub revision: i64,
+    pub canvas: CanvasId,
 }
 
 impl Processor<ConnectPorts> for SurrealProcessor {
     type Output = EdgeConnectionEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ConnectPorts", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:ConnectPorts", skip(self), err)]
     async fn process(&self, input: ConnectPorts) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
             .db()
             .query(
-                "RELATE ONLY $source->orchestration_edge_connection->$target
-                 CONTENT { created_rev: $revision, retired_rev: NONE }",
+                "BEGIN TRANSACTION;
+                 LET $edge = (RELATE ONLY $source->orchestration_edge_connection->$target);
+                 UPDATE $canvas SET generation += 1;
+                 RETURN $edge;
+                 COMMIT TRANSACTION;",
             )
             .bind(("source", input.source))
             .bind(("target", input.target))
-            .bind(("revision", input.revision))
+            .bind(("canvas", input.canvas))
             .await?;
-        resp.take::<Option<EdgeConnectionEntity>>(0)?
+        resp.take::<Option<EdgeConnectionEntity>>(3)?
             .ok_or_else(|| surrealdb::Error::internal("relate returned no row".to_string()))
     }
 }
@@ -65,36 +67,6 @@ impl Processor<FindEdgeById> for SurrealProcessor {
 }
 
 #[derive(Debug)]
-pub struct ListLiveEdgesByCanvas {
-    pub canvas: CanvasId,
-}
-
-impl Processor<ListLiveEdgesByCanvas> for SurrealProcessor {
-    type Output = Vec<EdgeConnectionEntity>;
-    type Error = surrealdb::Error;
-    #[tracing::instrument(
-        name = "Query:ListLiveEdgesByCanvas",
-        skip(self),
-        err,
-        fields(result_count)
-    )]
-    async fn process(&self, input: ListLiveEdgesByCanvas) -> Result<Self::Output, Self::Error> {
-        let mut resp = self
-            .db()
-            .query(
-                "SELECT * FROM orchestration_edge_connection
-                 WHERE in.owner.canvas = $canvas AND retired_rev IS NONE",
-            )
-            .bind(("canvas", input.canvas))
-            .await?;
-        let result = resp.take::<Vec<EdgeConnectionEntity>>(0)?;
-        tracing::Span::current().record("result_count", result.len());
-        Ok(result)
-    }
-}
-
-#[derive(Debug)]
-/// Live **and** retiring edges, for the dashboard view of a rollout in flight.
 pub struct ListEdgesByCanvas {
     pub canvas: CanvasId,
 }
@@ -121,64 +93,25 @@ impl Processor<ListEdgesByCanvas> for SurrealProcessor {
 }
 
 #[derive(Debug)]
-pub struct FindLiveEdgeByPort {
-    pub port: PortId,
-}
-
-impl Processor<FindLiveEdgeByPort> for SurrealProcessor {
-    type Output = Option<EdgeConnectionEntity>;
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindLiveEdgeByPort", skip(self), err)]
-    async fn process(&self, input: FindLiveEdgeByPort) -> Result<Self::Output, Self::Error> {
-        let mut resp = self
-            .db()
-            .query(
-                "SELECT * FROM orchestration_edge_connection
-                 WHERE retired_rev IS NONE AND (in = $port OR out = $port) LIMIT 1",
-            )
-            .bind(("port", input.port))
-            .await?;
-        resp.take::<Option<EdgeConnectionEntity>>(0)
-    }
-}
-
-#[derive(Debug)]
-pub struct RetireEdgeRow {
+pub struct DeleteEdgeRow {
     pub id: EdgeConnectionId,
-    pub revision: i64,
+    pub canvas: CanvasId,
 }
 
-impl Processor<RetireEdgeRow> for SurrealProcessor {
+impl Processor<DeleteEdgeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:RetireEdgeRow", skip(self), err)]
-    async fn process(&self, input: RetireEdgeRow) -> Result<Self::Output, Self::Error> {
+    #[tracing::instrument(name = "Query-Transaction:DeleteEdgeRow", skip(self), err)]
+    async fn process(&self, input: DeleteEdgeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(
-                "UPDATE orchestration_edge_connection SET retired_rev = $revision
-                 WHERE id = $id AND retired_rev IS NONE",
+                "BEGIN TRANSACTION;
+                 DELETE $id;
+                 UPDATE $canvas SET generation += 1;
+                 COMMIT TRANSACTION;",
             )
             .bind(("id", input.id))
-            .bind(("revision", input.revision))
-            .await?
-            .check()?;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct ForceDeleteEdgeRow {
-    pub id: EdgeConnectionId,
-}
-
-impl Processor<ForceDeleteEdgeRow> for SurrealProcessor {
-    type Output = ();
-    type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ForceDeleteEdgeRow", skip(self), err)]
-    async fn process(&self, input: ForceDeleteEdgeRow) -> Result<Self::Output, Self::Error> {
-        self.db()
-            .query("DELETE orchestration_edge_connection WHERE id = $id")
-            .bind(("id", input.id))
+            .bind(("canvas", input.canvas))
             .await?
             .check()?;
         Ok(())

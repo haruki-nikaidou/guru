@@ -64,7 +64,9 @@ fn assert_golden(name: &str, toml: &str) {
 fn derived(builder: &Builder, server: &ServerId) -> String {
     derive_server_config(&builder.build(), server)
         .unwrap_or_else(|e| panic!("derive failed: {e}"))
-        .toml
+        .config
+        .to_toml_string()
+        .unwrap_or_else(|e| panic!("rendering failed: {e}"))
 }
 
 #[test]
@@ -79,13 +81,17 @@ fn single_pod_to_entry_and_exit() {
     b.connect("exit-destination", "pod-destination");
 
     let result = derive_server_config(&b.build(), &s).unwrap();
-    assert_golden("single_pod", &result.toml);
+    assert_golden("single_pod", &result.config.to_toml_string().unwrap());
     assert_eq!(
-        result.nodes.len(),
-        3,
-        "pod, entry and exit are retained for this revision"
+        result.forwardings.len(),
+        1,
+        "one pod, one forwarding, one listener capability"
     );
-    assert_eq!(result.edges.len(), 2);
+    assert_eq!(result.forwardings[0].serves.port, 443);
+    assert!(
+        result.forwardings[0].points_at.is_empty(),
+        "an exit destination is not a listener this fabric serves"
+    );
 }
 
 #[test]
@@ -269,5 +275,5 @@ fn a_pod_with_an_unconnected_port_is_skipped() {
     b.node("pod", pod(&ip, 443), pod_ports());
     let result = derive_server_config(&b.build(), &s).unwrap();
     assert!(result.config.forwardings.is_empty());
-    assert!(result.nodes.is_empty());
+    assert!(result.forwardings.is_empty());
 }

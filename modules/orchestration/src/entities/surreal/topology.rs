@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use wakuwaku::surreal::SurrealProcessor;
 
 /// A consistent read of everything the topology checker and the config deriver need.
-/// Only live rows: retired nodes and edges take part in no derivation.
 #[derive(Debug, Clone)]
 pub struct CanvasTopology {
     pub canvas: CanvasId,
@@ -31,7 +30,7 @@ impl Processor<LoadCanvasTopology> for SurrealProcessor {
     type Error = surrealdb::Error;
     #[tracing::instrument(name = "Query:LoadCanvasTopology", skip_all, err)]
     async fn process(&self, input: LoadCanvasTopology) -> Result<Self::Output, Self::Error> {
-        let (servers, ips, nodes, edges) = load_canvas(self, &input.canvas, true).await?;
+        let (servers, ips, nodes, edges) = load_canvas(self, &input.canvas).await?;
         Ok(CanvasTopology {
             canvas: input.canvas,
             servers,
@@ -42,7 +41,7 @@ impl Processor<LoadCanvasTopology> for SurrealProcessor {
     }
 }
 
-/// Live **and** retiring rows, for rendering a rollout in flight.
+/// Everything the dashboard renders for one canvas.
 pub struct LoadCanvasContents {
     pub canvas: CanvasId,
 }
@@ -60,7 +59,7 @@ impl Processor<LoadCanvasContents> for SurrealProcessor {
         let Some(canvas) = resp.take::<Option<CanvasEntity>>(0)? else {
             return Ok(None);
         };
-        let (servers, ips, nodes, edges) = load_canvas(self, &input.canvas, false).await?;
+        let (servers, ips, nodes, edges) = load_canvas(self, &input.canvas).await?;
         let mut by_server: HashMap<String, Vec<ServerIpRecordEntity>> = HashMap::new();
         for ip in ips {
             by_server
@@ -104,7 +103,7 @@ impl Processor<FindCanvasOfServer> for SurrealProcessor {
     }
 }
 
-type CanvasRows = (
+pub(crate) type CanvasRows = (
     Vec<ServerEntity>,
     Vec<ServerIpRecordEntity>,
     Vec<NodeWithPorts>,
@@ -112,23 +111,30 @@ type CanvasRows = (
 );
 
 /// Reads the servers, ip records, nodes (with their ports) and edges of one canvas.
-/// `live_only` filters out rows that are retired but not yet garbage-collected.
 async fn load_canvas(
     sp: &SurrealProcessor,
     canvas: &CanvasId,
-    live_only: bool,
 ) -> Result<CanvasRows, surrealdb::Error> {
-    let sql = if live_only {
-        include_str!("../../../sql/topology/load_canvas_live.surql")
-    } else {
-        include_str!("../../../sql/topology/load_canvas_all.surql")
-    };
-    let mut resp = sp.db().query(sql).bind(("canvas", canvas.clone())).await?;
-    let servers = resp.take::<Vec<ServerEntity>>(0)?;
-    let ips = resp.take::<Vec<ServerIpRecordEntity>>(1)?;
-    let node_rows = resp.take::<Vec<NodeEntity>>(2)?;
-    let port_rows = resp.take::<Vec<PortEntity>>(3)?;
-    let edges = resp.take::<Vec<EdgeConnectionEntity>>(4)?;
+    let mut resp = sp
+        .db()
+        .query(include_str!("../../../sql/topology/load_canvas.surql"))
+        .bind(("canvas", canvas.clone()))
+        .await?;
+    group_rows(&mut resp, 0)
+}
+
+/// Groups the five canvas reads of `load_canvas.surql`, whose first statement sits
+/// at `offset`, into ports-per-node shape. Shared with the derivation read, which
+/// wraps the same statements in a transaction.
+pub(crate) fn group_rows(
+    resp: &mut surrealdb::IndexedResults,
+    offset: usize,
+) -> Result<CanvasRows, surrealdb::Error> {
+    let servers = resp.take::<Vec<ServerEntity>>(offset)?;
+    let ips = resp.take::<Vec<ServerIpRecordEntity>>(offset.saturating_add(1))?;
+    let node_rows = resp.take::<Vec<NodeEntity>>(offset.saturating_add(2))?;
+    let port_rows = resp.take::<Vec<PortEntity>>(offset.saturating_add(3))?;
+    let edges = resp.take::<Vec<EdgeConnectionEntity>>(offset.saturating_add(4))?;
 
     let mut ports_by_node: HashMap<String, Vec<PortEntity>> = HashMap::new();
     for port in port_rows {

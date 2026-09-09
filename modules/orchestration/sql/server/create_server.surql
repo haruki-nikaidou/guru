@@ -1,0 +1,14 @@
+BEGIN TRANSACTION;
+LET $server = (CREATE ONLY orchestration_server CONTENT {
+    canvas: $canvas, name: $name, icon: $icon, comment: $comment,
+    position: $position, ipv6_resolve: $ipv6_resolve, log_level: $log_level,
+    current_dynamic_refresh_key: NONE, refresh_key_generation: 0, watch_epoch: 0,
+    session_lease_until: NONE, last_seen_at: NONE
+});
+CREATE orchestration_server_config_view CONTENT {
+    server: $server.id, desired: NONE, in_flight: NONE, applied: NONE,
+    failed_revision: NONE, apply_error: NONE, derive_error: NONE, waiting_for: []
+};
+UPDATE $canvas SET generation += 1;
+RETURN $server;
+COMMIT TRANSACTION;

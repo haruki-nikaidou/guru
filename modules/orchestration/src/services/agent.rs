@@ -4,12 +4,12 @@
 //! digest. Every registration rotates the key and bumps the generation, so a worker
 //! restart is visible to the master and the previous session's streams die.
 
-use crate::entities::surreal::revision::{FindServerConfigRevision, PruneServerRevisionsBelow};
 use crate::entities::surreal::server::{
-    FindServerById, FindServerByRefreshKeyDigest, MarkServerApplied, RotateServerRefreshKey,
-    ServerId, SetServerApplyError,
+    FindServerById, FindServerByRefreshKeyDigest, RegisterWorkerSession, ServerId,
 };
+use crate::entities::surreal::view::AckServerConfig;
 use crate::services::OrchestrationError;
+use crate::services::rollout::DirtyNotifier;
 use crate::services::watch::{SessionLease, WatchHub};
 use crate::utils::ids::record_key;
 use auth::services::identity::Identity;
@@ -31,6 +31,7 @@ pub struct AgentService {
     pub db: SurrealProcessor,
     pub hub: WatchHub,
     pub lease: SessionLease,
+    pub notifier: DirtyNotifier,
 }
 
 pub struct RegisterWorker {
@@ -56,60 +57,30 @@ impl Processor<RegisterWorker> for AgentService {
 
         let secret = generate_refresh_key();
         let now = Utc::now();
-        // Refused while another session still heartbeats: a second worker pointed at
-        // the same server must not be able to take it over just by reconnecting.
-        let generation = self
+        // One transaction: rotate the key, reconcile what the worker reports, and
+        // clear whatever was in flight — the worker is not running it. Refused
+        // while another session still heartbeats, so a second worker pointed at
+        // the same server cannot take it over just by reconnecting.
+        let rotated = self
             .db
-            .process(RotateServerRefreshKey {
+            .process(RegisterWorkerSession {
                 server: server.id.clone(),
+                canvas: server.canvas.clone(),
                 digest: sha256_hex(&secret),
                 now,
                 lease_until: self.lease.until(now),
+                running_revision: input.running_revision,
             })
             .await?
             .ok_or_else(|| {
                 OrchestrationError::Conflict(
                     "another worker session is live for this server".into(),
                 )
-            })?
-            .refresh_key_generation;
+            })?;
 
-        // Reconcile what the worker reports it is actually running.
-        if input.running_revision > 0 {
-            let known = self
-                .db
-                .process(FindServerConfigRevision {
-                    server: server.id.clone(),
-                    revision: input.running_revision,
-                })
-                .await?;
-            match known {
-                Some(_) => {
-                    self.db
-                        .process(MarkServerApplied {
-                            server: server.id.clone(),
-                            revision: input.running_revision,
-                        })
-                        .await?;
-                    self.db
-                        .process(PruneServerRevisionsBelow {
-                            server: server.id.clone(),
-                            revision: input.running_revision,
-                        })
-                        .await?;
-                }
-                None => {
-                    self.db
-                        .process(SetServerApplyError {
-                            server: server.id.clone(),
-                            error: format!("running revision {} unknown", input.running_revision),
-                        })
-                        .await?;
-                }
-            }
-        }
-
-        self.hub.supersede(&record_key(&server.id.0), generation);
+        self.hub
+            .supersede(&record_key(&server.id.0), rotated.refresh_key_generation);
+        self.notifier.notify(&server.canvas).await;
         Ok(secret)
     }
 }
@@ -157,37 +128,22 @@ impl Processor<AckConfig> for AgentService {
         if server.refresh_key_generation != input.agent.generation {
             return Err(OrchestrationError::PermissionDenied);
         }
-        match input.error {
-            Some(error) => {
-                self.db
-                    .process(SetServerApplyError {
-                        server: server.id,
-                        error,
-                    })
-                    .await?;
-            }
-            None => {
-                self.db
-                    .process(FindServerConfigRevision {
-                        server: server.id.clone(),
-                        revision: input.revision,
-                    })
-                    .await?
-                    .ok_or_else(|| OrchestrationError::Invalid("unknown revision".into()))?;
-                self.db
-                    .process(MarkServerApplied {
-                        server: server.id.clone(),
-                        revision: input.revision,
-                    })
-                    .await?;
-                self.db
-                    .process(PruneServerRevisionsBelow {
-                        server: server.id,
-                        revision: input.revision,
-                    })
-                    .await?;
-            }
+        // One conditional update: an ack only lands on the revision the database
+        // itself handed this session, so a stale or invented revision changes
+        // nothing instead of silently marking the wrong config applied.
+        let matched = self
+            .db
+            .process(AckServerConfig {
+                server: server.id,
+                canvas: server.canvas.clone(),
+                revision: input.revision,
+                error: input.error,
+            })
+            .await?;
+        if !matched {
+            return Err(OrchestrationError::Invalid("unknown revision".into()));
         }
+        self.notifier.notify(&server.canvas).await;
         Ok(())
     }
 }
