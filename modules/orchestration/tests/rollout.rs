@@ -636,3 +636,67 @@ async fn a_worker_credential_cannot_edit_the_workspace() -> TestResult {
     assert!(matches!(err, OrchestrationError::Core(_)), "{err:?}");
     Ok(())
 }
+
+/// A pod that stops deriving keeps carrying what it already serves: the listener
+/// stays in `desired`, the reason lands in `invalid_pods`, and the server is not
+/// failed as a whole.
+#[tokio::test]
+async fn a_pod_that_stops_deriving_keeps_serving_its_listener() -> TestResult {
+    let w = world().await?;
+    let f = relay_chain(&w).await?;
+    settle(&w, &f).await?;
+
+    let before = w.view(&f.tokyo).await?;
+    let served = serves(&before, &before.applied);
+    assert_eq!(
+        served,
+        vec![cap("203.0.113.10", 443, ListenProtocol::Raw)],
+        "tokyo serves its ingress listener before the edit"
+    );
+    assert!(before.invalid_pods.is_empty(), "{:?}", before.invalid_pods);
+
+    // Cut the relay off from the pod feeding its listen side. Tokyo's ingress pod
+    // dials that relay, so the pod alone stops deriving.
+    let mut resp =
+        w.db.db()
+            .query("SELECT * FROM orchestration_edge_connection")
+            .await?;
+    let edge = resp
+        .take::<Vec<orchestration::entities::surreal::connection::EdgeConnectionEntity>>(0)?
+        .into_iter()
+        .find(|e| {
+            [&e.source, &e.target].iter().any(|p| {
+                orchestration::utils::ids::record_key(&p.0)
+                    == orchestration::utils::ids::record_key(&f.to_osaka_listen.0)
+            })
+        })
+        .ok_or("the relay listen edge must exist")?;
+    w.edges
+        .process(Disconnect {
+            actor: operator(),
+            edge: edge.id,
+        })
+        .await?;
+    w.derive(&f.canvas).await?;
+
+    let after = w.view(&f.tokyo).await?;
+    assert!(
+        after.derive_error.is_none(),
+        "one broken pod is not a server failure: {:?}",
+        after.derive_error
+    );
+    let [invalid] = after.invalid_pods.as_slice() else {
+        panic!(
+            "expected the ingress pod to be reported, got {:?}",
+            after.invalid_pods
+        );
+    };
+    assert_eq!(invalid.pod, "ingress");
+    assert_eq!(invalid.listen, "203.0.113.10:443");
+    assert_eq!(
+        serves(&after, &after.desired),
+        served,
+        "the listener it already carries is held, not dropped"
+    );
+    Ok(())
+}

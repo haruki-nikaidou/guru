@@ -4,18 +4,23 @@
 //! always produces byte-identical output — that is what lets a derivation pass skip
 //! servers whose config did not actually change. What a server may *safely* run
 //! right now is decided afterwards, in [`crate::services::converge`].
+//!
+//! Failure is per pod, not per server: each pod's listen and destination walks are
+//! caught at the pod, so one malformed chain costs exactly its own forwarding and
+//! every healthy pod on the server still rolls out. Only a cross-pod failure — two
+//! pods claiming one socket — can fail the whole server.
 
 use crate::entities::surreal::node::{
-    NodeSpec, NodeWithPorts, RelayProtocol as EntityRelayProtocol,
+    NodeSpec, NodeWithPorts, PodConfig, RelayProtocol as EntityRelayProtocol,
 };
 use crate::entities::surreal::port::{PortDirection, PortEntity};
 use crate::entities::surreal::server::{ServerId, ServerIpRecordEntity};
 use crate::entities::surreal::topology::CanvasTopology;
-use crate::entities::surreal::view::{ForwardingDeps, ListenProtocol, ListenerCap};
+use crate::entities::surreal::view::{ForwardingDeps, InvalidPod, ListenProtocol, ListenerCap};
 use crate::utils::ids::record_key;
 use guru_worker_config::{
     Config, Forwarding, ForwardingTo, ListenAs, LoadBalanceGroup, LogConfig, RelayHost,
-    RelayProtocol, Remote,
+    RelayProtocol, Remote, TcpProxyProtocol,
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -56,6 +61,8 @@ pub struct DerivedConfig {
     pub config: Config,
     /// Index-aligned with `config.forwardings`.
     pub forwardings: Vec<ForwardingDeps>,
+    /// Pods that could not be derived. The rest of `config` is unaffected.
+    pub invalid: Vec<InvalidPod>,
 }
 
 pub fn derive_server_config(
@@ -74,6 +81,7 @@ pub fn derive_server_config(
     let index = DeriveIndex::build(topology);
     let mut forwardings = Vec::new();
     let mut deps = Vec::new();
+    let mut invalid = Vec::new();
 
     let mut pods: Vec<&NodeWithPorts> = topology
         .nodes
@@ -86,6 +94,9 @@ pub fn derive_server_config(
         let NodeSpec::Pod(cfg) = &pod.node.spec else {
             continue;
         };
+        // Unattributable rather than pod-level: the ip record is what says which
+        // server owns this pod, so a dangling link cannot be blamed on one server.
+        // The schema rejects such a link, which is why this stays a hard failure.
         let ip = index
             .ip(&record_key(&cfg.ip.0))
             .ok_or_else(|| DeriveError::MissingIpRecord {
@@ -106,75 +117,18 @@ pub fn derive_server_config(
             continue;
         }
 
-        let address: IpAddr = ip.ip.parse().map_err(|_| DeriveError::InvalidIp {
-            ip: record_key(&ip.id.0),
-            value: ip.ip.clone(),
-        })?;
-
-        let consumer = index
-            .peer(listen_port)
-            .ok_or_else(|| DeriveError::UnsupportedSpec {
-                node: pod.node.name.clone(),
-            })?;
-        let (listen_as, listen_protocol, receive_proxy_protocol) = match &consumer.node.spec {
-            NodeSpec::Entry(entry) => {
-                if entry.tls.is_some() {
-                    return Err(DeriveError::TlsNotYetSupported {
-                        node: consumer.node.name.clone(),
-                    });
-                }
-                (
-                    ListenAs::Raw,
-                    ListenProtocol::Raw,
-                    entry.receive_proxy_protocol.map(Into::into),
-                )
+        match derive_pod(&index, pod, cfg, ip, listen_port, destination_port) {
+            Ok((forwarding, pod_deps)) => {
+                forwardings.push(forwarding);
+                deps.push(pod_deps);
             }
-            NodeSpec::Relay(relay) => match relay.protocol {
-                // The worker auto-detects PROXY on relay ingest.
-                EntityRelayProtocol::TcpRaw => (
-                    ListenAs::Relay(RelayHost::Tcp),
-                    ListenProtocol::RelayTcp,
-                    None,
-                ),
-                other => {
-                    return Err(DeriveError::RelayProtocolNotYetSupported {
-                        node: consumer.node.name.clone(),
-                        protocol: relay_protocol_name(other),
-                    });
-                }
-            },
-            _ => {
-                return Err(DeriveError::UnsupportedSpec {
-                    node: consumer.node.name.clone(),
-                });
-            }
-        };
-
-        let producer =
-            index
-                .peer(destination_port)
-                .ok_or_else(|| DeriveError::UnsupportedSpec {
-                    node: pod.node.name.clone(),
-                })?;
-        let mut visited = Vec::new();
-        let mut points_at = Vec::new();
-        let to = derive_destination(&index, producer, &mut visited, &mut points_at)?;
-
-        forwardings.push(Forwarding {
-            tag: pod.node.name.clone(),
-            listen: SocketAddr::new(address, cfg.port),
-            receive_proxy_protocol,
-            listen_as,
-            to,
-        });
-        deps.push(ForwardingDeps {
-            serves: ListenerCap {
-                ip: ip.ip.clone(),
-                port: i64::from(cfg.port),
-                protocol: listen_protocol,
-            },
-            points_at,
-        });
+            Err(error) => invalid.push(InvalidPod {
+                node: pod.node.id.clone(),
+                pod: pod.node.name.clone(),
+                listen: format!("{}:{}", ip.ip, cfg.port),
+                error: error.to_string(),
+            }),
+        }
     }
 
     let config = Config {
@@ -184,11 +138,101 @@ pub fn derive_server_config(
         },
         forwardings,
     };
+    // Every entry validated itself in `derive_pod`; what is left is the cross-pod
+    // rule, which no single pod can be blamed for.
     config.validate()?;
     Ok(DerivedConfig {
         config,
         forwardings: deps,
+        invalid,
     })
+}
+
+/// One pod's `[[forwarding]]` entry, or why that pod alone cannot be derived.
+fn derive_pod(
+    index: &DeriveIndex<'_>,
+    pod: &NodeWithPorts,
+    cfg: &PodConfig,
+    ip: &ServerIpRecordEntity,
+    listen_port: &PortEntity,
+    destination_port: &PortEntity,
+) -> Result<(Forwarding, ForwardingDeps), DeriveError> {
+    let address: IpAddr = ip.ip.parse().map_err(|_| DeriveError::InvalidIp {
+        ip: record_key(&ip.id.0),
+        value: ip.ip.clone(),
+    })?;
+    let (listen_as, listen_protocol, receive_proxy_protocol) =
+        derive_listen(index, pod, listen_port)?;
+
+    let producer = index
+        .peer(destination_port)
+        .ok_or_else(|| DeriveError::UnsupportedSpec {
+            node: pod.node.name.clone(),
+        })?;
+    let mut visited = Vec::new();
+    let mut points_at = Vec::new();
+    let to = derive_destination(index, producer, &mut visited, &mut points_at)?;
+
+    let forwarding = Forwarding {
+        tag: pod.node.name.clone(),
+        listen: SocketAddr::new(address, cfg.port),
+        receive_proxy_protocol,
+        listen_as,
+        to,
+    };
+    forwarding.validate()?;
+    let deps = ForwardingDeps {
+        pod: pod.node.id.clone(),
+        serves: ListenerCap {
+            ip: ip.ip.clone(),
+            port: i64::from(cfg.port),
+            protocol: listen_protocol,
+        },
+        points_at,
+    };
+    Ok((forwarding, deps))
+}
+
+/// The listen side of one pod: what the node feeding its `listen` port makes it.
+fn derive_listen(
+    index: &DeriveIndex<'_>,
+    pod: &NodeWithPorts,
+    listen_port: &PortEntity,
+) -> Result<(ListenAs, ListenProtocol, Option<TcpProxyProtocol>), DeriveError> {
+    let consumer = index
+        .peer(listen_port)
+        .ok_or_else(|| DeriveError::UnsupportedSpec {
+            node: pod.node.name.clone(),
+        })?;
+    match &consumer.node.spec {
+        NodeSpec::Entry(entry) => {
+            if entry.tls.is_some() {
+                return Err(DeriveError::TlsNotYetSupported {
+                    node: consumer.node.name.clone(),
+                });
+            }
+            Ok((
+                ListenAs::Raw,
+                ListenProtocol::Raw,
+                entry.receive_proxy_protocol.map(Into::into),
+            ))
+        }
+        NodeSpec::Relay(relay) => match relay.protocol {
+            // The worker auto-detects PROXY on relay ingest.
+            EntityRelayProtocol::TcpRaw => Ok((
+                ListenAs::Relay(RelayHost::Tcp),
+                ListenProtocol::RelayTcp,
+                None,
+            )),
+            other => Err(DeriveError::RelayProtocolNotYetSupported {
+                node: consumer.node.name.clone(),
+                protocol: relay_protocol_name(other),
+            }),
+        },
+        _ => Err(DeriveError::UnsupportedSpec {
+            node: consumer.node.name.clone(),
+        }),
+    }
 }
 
 /// Walks the destination side of one pod, collecting into `points_at` every

@@ -37,3 +37,100 @@ contains = [
     "DEFINE FIELD generation ON orchestration_canvas TYPE int DEFAULT 0",
     "DEFINE FIELD derived_generation ON orchestration_canvas TYPE int DEFAULT 0",
 ]
+
+# Stage-1 per-pod isolation: a pod that cannot be derived is recorded on its
+# server's config view row while the rest of the server's config is published,
+# so the field must exist and default to an empty array — the Rust side reads it
+# as `Vec<InvalidPod>`, which cannot decode a missing/NONE value. FLEXIBLE is
+# what lets the four keys of each element survive a SCHEMAFULL table.
+[[cases]]
+name = "config_view_stores_invalid_pods"
+kind = "schema_metadata"
+sql = "INFO FOR TABLE orchestration_server_config_view;"
+contains = [
+    "DEFINE FIELD invalid_pods ON orchestration_server_config_view TYPE array<object> FLEXIBLE DEFAULT []",
+]
+
+[[cases]]
+name = "config_view_row_without_invalid_pods_reads_back_empty"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:empty_pods CONTENT { name: "c", description: "" };
+CREATE orchestration_server:empty_pods CONTENT { canvas: orchestration_canvas:empty_pods, name: "s", icon: "", comment: "", position: { x: 0, y: 0 }, ipv6_resolve: "tolerated", log_level: "info" };
+CREATE orchestration_server_config_view:empty_pods CONTENT { server: orchestration_server:empty_pods, desired: NONE, in_flight: NONE, applied: NONE, failed_revision: NONE, apply_error: NONE, derive_error: NONE, waiting_for: [] };
+RETURN array::len(orchestration_server_config_view:empty_pods.invalid_pods);
+"""
+allow = true
+
+[[cases]]
+name = "config_view_round_trips_invalid_pod_objects"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:round_trip CONTENT { name: "c", description: "" };
+CREATE orchestration_server:round_trip CONTENT { canvas: orchestration_canvas:round_trip, name: "s", icon: "", comment: "", position: { x: 0, y: 0 }, ipv6_resolve: "tolerated", log_level: "info" };
+CREATE server_ip_record:round_trip CONTENT { server: orchestration_server:round_trip, ip: "10.0.0.1", country: "JP" };
+CREATE orchestration_node:round_trip CONTENT { canvas: orchestration_canvas:round_trip, name: "pod", comment: "", spec: { type: "pod", config: { ip: server_ip_record:round_trip, port: 8080 } }, position: { x: 0, y: 0 } };
+CREATE orchestration_server_config_view:round_trip CONTENT { server: orchestration_server:round_trip, desired: NONE, in_flight: NONE, applied: NONE, failed_revision: NONE, apply_error: NONE, derive_error: NONE, invalid_pods: [{ node: orchestration_node:round_trip, pod: "pod", listen: "10.0.0.1:8080", error: "listen input is not fed by a pod" }], waiting_for: [] };
+RETURN orchestration_server_config_view:round_trip.invalid_pods[0];
+"""
+allow = true
+
+# A pod's `spec.config.ip` is what attributes the pod to a server during
+# derivation. A dangling link is the one derivation failure that belongs to no
+# server, so it could neither be published nor reported as an invalid pod: the
+# database refuses it outright. The shape below must match what `NodeSpec`
+# actually serialises — a tagged enum, i.e. `{ type, config }` — or the case
+# would pass while the real write path stays unguarded.
+[[cases]]
+name = "pod_with_existing_ip_is_accepted"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:sound_ip CONTENT { name: "c", description: "" };
+CREATE orchestration_server:sound_ip CONTENT { canvas: orchestration_canvas:sound_ip, name: "s", icon: "", comment: "", position: { x: 0, y: 0 }, ipv6_resolve: "tolerated", log_level: "info" };
+CREATE server_ip_record:sound_ip CONTENT { server: orchestration_server:sound_ip, ip: "10.0.0.2", country: "JP" };
+CREATE orchestration_node:sound_ip CONTENT { canvas: orchestration_canvas:sound_ip, name: "pod", comment: "", spec: { type: "pod", config: { ip: server_ip_record:sound_ip, port: 8080 } }, position: { x: 0, y: 0 } };
+"""
+allow = true
+
+[[cases]]
+name = "pod_with_dangling_ip_is_rejected"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:dangling_ip CONTENT { name: "c", description: "" };
+CREATE orchestration_node:dangling_ip CONTENT { canvas: orchestration_canvas:dangling_ip, name: "pod", comment: "", spec: { type: "pod", config: { ip: server_ip_record:ghost, port: 8080 } }, position: { x: 0, y: 0 } };
+"""
+allow = false
+error_contains = "spec.config.ip"
+
+# An ip record that exists but belongs to another canvas is as unusable as a
+# missing one: derivation loads a single canvas.
+[[cases]]
+name = "pod_with_foreign_canvas_ip_is_rejected"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:scope_a CONTENT { name: "a", description: "" };
+CREATE orchestration_canvas:scope_b CONTENT { name: "b", description: "" };
+CREATE orchestration_server:scope_a CONTENT { canvas: orchestration_canvas:scope_a, name: "s", icon: "", comment: "", position: { x: 0, y: 0 }, ipv6_resolve: "tolerated", log_level: "info" };
+CREATE server_ip_record:scope_a CONTENT { server: orchestration_server:scope_a, ip: "10.0.0.3", country: "JP" };
+CREATE orchestration_node:scope_cross CONTENT { canvas: orchestration_canvas:scope_b, name: "pod", comment: "", spec: { type: "pod", config: { ip: server_ip_record:scope_a, port: 8080 } }, position: { x: 0, y: 0 } };
+"""
+allow = false
+error_contains = "spec.config.ip"
+
+# Only a pod spec carries an `ip` key; an Entry, Exit or Relay node must stay
+# insertable with no `ip` at all, which is why `spec.config.ip` is optional and
+# the assertion tolerates NONE.
+[[cases]]
+name = "non_pod_node_needs_no_ip"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:no_ip CONTENT { name: "c", description: "" };
+CREATE orchestration_node:no_ip CONTENT { canvas: orchestration_canvas:no_ip, name: "entry", comment: "", spec: { type: "entry", config: { receive_proxy_protocol: NONE, tls: NONE } }, position: { x: 0, y: 0 } };
+"""
+allow = true

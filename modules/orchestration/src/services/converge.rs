@@ -5,7 +5,7 @@
 //! given what every other server is running at this instant, which forwardings can
 //! be handed to this server without breaking a path that is still in use.
 //!
-//! Two rules, and they are enough:
+//! Three rules, and they are enough:
 //!
 //! 1. **Never point at a listener nobody serves yet.** A forwarding whose targets
 //!    are not in some server's `applied` snapshot keeps its previous shape (or is
@@ -14,16 +14,20 @@
 //!    any other server's `desired`, `in_flight` or `applied` snapshot is kept alive
 //!    from this server's own previous snapshot, even after the canvas stopped
 //!    asking for it.
+//! 3. **Never drop a listener because its pod stopped deriving.** A pod reported
+//!    invalid by derivation keeps the shape it already had, so a half-finished edit
+//!    costs an error message rather than the traffic that pod is carrying.
 //!
-//! Applying both on every derivation pass makes a multi-hop change converge in as
+//! Applying them on every derivation pass makes a multi-hop change converge in as
 //! many passes as there are hops, with no coordinator and no ordering: each pass is
 //! a pure function of the fabric's current state, so a lost message or a crashed
 //! master costs a retry, never correctness.
 
+use crate::entities::surreal::node::NodeId;
 use crate::entities::surreal::server::ServerId;
 use crate::entities::surreal::topology::CanvasTopology;
 use crate::entities::surreal::view::{
-    ConfigSnapshot, ForwardingDeps, ListenProtocol, ListenerCap, ServerConfigViewEntity,
+    ConfigSnapshot, ForwardingDeps, InvalidPod, ListenProtocol, ListenerCap, ServerConfigViewEntity,
 };
 use crate::services::OrchestrationError;
 use crate::services::derive::{DerivedConfig, derive_server_config};
@@ -39,6 +43,8 @@ pub struct Converged {
     pub forwardings: Vec<ForwardingDeps>,
     /// Servers this one is waiting on before it can adopt its ideal config.
     pub waiting_for: Vec<ServerId>,
+    /// Pods derivation could not build, carried through to the config view.
+    pub invalid: Vec<InvalidPod>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +60,10 @@ pub enum ConvergeError {
     },
     #[error("stored snapshot is not valid TOML: {0}")]
     Snapshot(#[from] guru_worker_config::ConfigError),
+    #[error(
+        "stored snapshot revision {revision} has more forwarding dependencies than the rendered TOML has entries"
+    )]
+    SnapshotShape { revision: i64 },
 }
 
 /// Merges a server's ideal config with what the fabric can support today. The
@@ -116,7 +126,15 @@ pub fn converge(
             }
         }
         // Hold the previous shape of this listener until the target catches up.
-        if let Some(previous) = old_forwarding(own, &deps.serves)? {
+        if let Some(previous) = old_forwarding_of_pod(own, &deps.pod)? {
+            merged.push(previous);
+        }
+    }
+
+    // Rule 3: a pod that stopped deriving keeps what it is already serving. Keyed
+    // by pod, never by socket: the edit that broke the pod may also have moved it.
+    for pod in &ideal.invalid {
+        if let Some(previous) = old_forwarding_of_pod(own, &pod.node)? {
             merged.push(previous);
         }
     }
@@ -170,42 +188,71 @@ pub fn converge(
         },
         forwardings: deps,
         waiting_for: waiting,
+        invalid: ideal.invalid,
     })
 }
 
-/// This server's newest stored shape of one listener, preferring what it is
-/// actually running over what it was merely offered.
+/// This server's newest stored shape of one pod's forwarding, preferring what it
+/// is actually running over what it was merely offered.
+///
+/// Pod identity, not socket identity: an edit that breaks a pod may also move its
+/// listener, and a socket can be reused by a different pod entirely.
+fn old_forwarding_of_pod(
+    own: &ServerConfigViewEntity,
+    pod: &NodeId,
+) -> Result<Option<(Forwarding, ForwardingDeps)>, ConvergeError> {
+    snapshots_newest_first(own)
+        .find_map(|snapshot| {
+            let index = snapshot
+                .forwardings
+                .iter()
+                .position(|deps| deps.pod.0 == pod.0)?;
+            Some(entry_at(snapshot, index))
+        })
+        .transpose()
+}
+
+/// This server's newest stored shape of one listener, for a listener whose pod is
+/// unknown — it is only referenced by another server's snapshot.
 fn old_forwarding(
     own: &ServerConfigViewEntity,
     cap: &ListenerCap,
 ) -> Result<Option<(Forwarding, ForwardingDeps)>, ConvergeError> {
-    for snapshot in [&own.applied, &own.in_flight, &own.desired]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(found) = forwarding_in(snapshot, cap)? {
-            return Ok(Some(found));
-        }
-    }
-    Ok(None)
+    snapshots_newest_first(own)
+        .find_map(|snapshot| {
+            let index = snapshot
+                .forwardings
+                .iter()
+                .position(|deps| &deps.serves == cap)?;
+            Some(entry_at(snapshot, index))
+        })
+        .transpose()
 }
 
-fn forwarding_in(
+fn snapshots_newest_first(
+    own: &ServerConfigViewEntity,
+) -> impl Iterator<Item = &ConfigSnapshot> + '_ {
+    [&own.applied, &own.in_flight, &own.desired]
+        .into_iter()
+        .flatten()
+}
+
+/// Re-reads one `[[forwarding]]` entry out of a stored snapshot. `forwardings` is
+/// index-aligned with the rendered TOML, which is what makes this sound.
+fn entry_at(
     snapshot: &ConfigSnapshot,
-    cap: &ListenerCap,
-) -> Result<Option<(Forwarding, ForwardingDeps)>, ConvergeError> {
-    let Some(index) = snapshot
-        .forwardings
-        .iter()
-        .position(|deps| &deps.serves == cap)
-    else {
-        return Ok(None);
-    };
+    index: usize,
+) -> Result<(Forwarding, ForwardingDeps), ConvergeError> {
     let config = Config::from_toml_str(&snapshot.toml)?;
-    let Some(forwarding) = config.forwardings.into_iter().nth(index) else {
-        return Ok(None);
-    };
-    Ok(Some((forwarding, snapshot.forwardings[index].clone())))
+    let forwarding =
+        config
+            .forwardings
+            .into_iter()
+            .nth(index)
+            .ok_or(ConvergeError::SnapshotShape {
+                revision: snapshot.revision,
+            })?;
+    Ok((forwarding, snapshot.forwardings[index].clone()))
 }
 
 /// Rejects an edit that would put a different protocol on a socket some server

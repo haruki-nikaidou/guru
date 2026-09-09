@@ -44,6 +44,23 @@ DEFINE FIELD canvas ON orchestration_node TYPE record<orchestration_canvas>;
 DEFINE FIELD name ON orchestration_node TYPE string;
 DEFINE FIELD comment ON orchestration_node TYPE string;
 DEFINE FIELD spec ON orchestration_node TYPE object FLEXIBLE;
+-- A pod's spec carries `ip`, the `server_ip_record` it listens on, and that link
+-- is what attributes the pod to a server: derivation resolves the pod's server
+-- through it, so a per-pod failure can be recorded on that server's
+-- `orchestration_server_config_view` row. A dangling link has no server to
+-- attribute it to, making it the one derivation failure that can be neither
+-- published nor reported, so the database refuses to store one. The same applies
+-- to an ip record in a different canvas: derivation loads one canvas at a time,
+-- so a foreign link is indistinguishable from a missing one.
+--
+-- The path is `spec.config.ip`, not `spec.ip`: `NodeSpec` is a tagged enum
+-- (`#[surreal(tag = "type", content = "config")]`), so a pod row reads
+-- `spec: { type: "pod", config: { ip, port } }`. `spec` stays FLEXIBLE — an
+-- Entry, Exit or Relay carries a different `config` shape with no `ip` key at
+-- all, hence `option<...>` and the explicit `NONE` arm in the assertion.
+DEFINE FIELD spec.config.ip ON orchestration_node TYPE option<record<server_ip_record>>
+    ASSERT $value == NONE
+        OR (record::exists($value) AND $value.server.canvas = $this.canvas);
 DEFINE FIELD position ON orchestration_node TYPE object;
 DEFINE FIELD position.x ON orchestration_node TYPE int;
 DEFINE FIELD position.y ON orchestration_node TYPE int;
@@ -71,5 +88,13 @@ DEFINE FIELD applied ON orchestration_server_config_view TYPE option<object> FLE
 DEFINE FIELD failed_revision ON orchestration_server_config_view TYPE option<int>;
 DEFINE FIELD apply_error ON orchestration_server_config_view TYPE option<string>;
 DEFINE FIELD derive_error ON orchestration_server_config_view TYPE option<string>;
+-- `derive_error` is a server-level failure: the server produced no config at all.
+-- `invalid_pods` is the per-pod counterpart: these pods could not be derived
+-- while the rest of this server's config stayed valid and was published, so an
+-- operator can see exactly which pod is broken and why. Each element is
+-- `{ node, pod, listen, error }`; FLEXIBLE because the elements are objects and
+-- a SCHEMAFULL table otherwise rejects their keys. A server-level failure leaves
+-- this list empty.
+DEFINE FIELD invalid_pods ON orchestration_server_config_view TYPE array<object> FLEXIBLE DEFAULT [];
 DEFINE FIELD waiting_for ON orchestration_server_config_view TYPE array<record<orchestration_server>> DEFAULT [];
 DEFINE INDEX orchestration_server_config_view_server ON orchestration_server_config_view FIELDS server UNIQUE;

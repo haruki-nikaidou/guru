@@ -331,6 +331,8 @@ impl Config {
         Ok(toml::to_string(self)?)
     }
 
+    /// Both the per-entry rules and the one cross-entry rule: no two forwardings
+    /// may claim the same socket.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut seen = HashSet::new();
         for f in &self.forwardings {
@@ -340,15 +342,26 @@ impl Config {
                     tag: f.tag.clone(),
                 });
             }
-            if let ForwardingTo::Relay { protocol, sni, .. } = &f.to {
-                let needs = matches!(protocol, RelayProtocol::TlsOverTcp | RelayProtocol::Quic);
-                if needs && sni.is_none() {
-                    return Err(ConfigError::MissingSni(f.tag.clone()));
-                }
-            }
-            reject_empty(&f.to, &f.tag)?;
+            f.validate()?;
         }
         Ok(())
+    }
+}
+
+impl Forwarding {
+    /// Everything that concerns this entry alone.
+    ///
+    /// Separate from [`Config::validate`] so a caller deriving a config entry by
+    /// entry can attribute a failure to the entry that caused it instead of
+    /// rejecting the whole file.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if let ForwardingTo::Relay { protocol, sni, .. } = &self.to {
+            let needs = matches!(protocol, RelayProtocol::TlsOverTcp | RelayProtocol::Quic);
+            if needs && sni.is_none() {
+                return Err(ConfigError::MissingSni(self.tag.clone()));
+            }
+        }
+        reject_empty(&self.to, &self.tag)
     }
 }
 

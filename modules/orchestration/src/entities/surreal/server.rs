@@ -295,12 +295,9 @@ impl Processor<DeleteServerIpRow> for SurrealProcessor {
     #[tracing::instrument(name = "Query-Transaction:DeleteServerIpRow", skip_all, err)]
     async fn process(&self, input: DeleteServerIpRow) -> Result<Self::Output, Self::Error> {
         self.db()
-            .query(
-                "BEGIN TRANSACTION;
-                 DELETE $id;
-                 UPDATE $canvas SET generation += 1;
-                 COMMIT TRANSACTION;",
-            )
+            .query(include_str!(
+                "../../../sql/server/delete_server_ip_row.surql"
+            ))
             .bind(("id", input.id))
             .bind(("canvas", input.canvas))
             .await?

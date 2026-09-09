@@ -337,8 +337,22 @@ message GetServerConfigReply {
 message GetServerRolloutStatusRequest {
   string server_id = 1;
 }
+// One pod that failed to derive on its own. `listen` is the `ip:port` it would
+// have served, `error` the rendered derivation error.
+message InvalidPod {
+  string node_id = 1;
+  string pod_name = 2;
+  string listen = 3;
+  string error = 4;
+}
 // `waiting_for_server_ids` are servers whose applied config does not yet serve a
 // listener this server's ideal config points at.
+//
+// `derive_error` is a whole-server derivation failure: nothing was published for
+// this server at all. `invalid_pods` is the per-pod counterpart: only those pods
+// failed, the rest of the server's config was derived and published normally,
+// and each listed pod keeps whatever listener shape it was already serving. A
+// server-level failure leaves `invalid_pods` empty.
 message GetServerRolloutStatusReply {
   ConfigSnapshot desired = 1;
   ConfigSnapshot in_flight = 2;
@@ -348,6 +362,7 @@ message GetServerRolloutStatusReply {
   repeated string waiting_for_server_ids = 6;
   bool derivation_pending = 7;
   string last_seen_at = 8;
+  repeated InvalidPod invalid_pods = 9;
 }
 // Admin only: declares a server dead, which lets its dependants switch away from
 // listeners it may in fact still be serving.

@@ -4,7 +4,7 @@ use crate::entities::surreal::canvas::{CanvasId, FindCanvasById};
 use crate::entities::surreal::server::{FindServerById, ServerId};
 use crate::entities::surreal::topology::FindCanvasOfServer;
 use crate::entities::surreal::view::{
-    ConfigSnapshot, FindServerConfigView, ForgetServerAppliedRow,
+    ConfigSnapshot, FindServerConfigView, ForgetServerAppliedRow, InvalidPod,
 };
 use crate::events::CanvasDirty;
 use crate::services::OrchestrationError;
@@ -82,6 +82,9 @@ pub struct RolloutStatus {
     pub applied: Option<ConfigSnapshot>,
     pub apply_error: Option<String>,
     pub derive_error: Option<String>,
+    /// Pods that failed to derive on their own; the rest of this server's config
+    /// was derived and published normally.
+    pub invalid_pods: Vec<InvalidPod>,
     pub waiting_for: Vec<ServerId>,
     /// The canvas has edits the derivation has not caught up with yet.
     pub derivation_pending: bool,
@@ -126,6 +129,7 @@ impl Processor<GetServerRolloutStatus> for RolloutService {
             applied: view.applied,
             apply_error: view.apply_error,
             derive_error: view.derive_error,
+            invalid_pods: view.invalid_pods,
             waiting_for: view.waiting_for,
             derivation_pending: canvas.generation > canvas.derived_generation,
             last_seen_at: server.last_seen_at,

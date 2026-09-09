@@ -806,8 +806,25 @@ export interface GetServerRolloutStatusRequest {
 }
 
 /**
+ * One pod that failed to derive on its own. `listen` is the `ip:port` it would
+ * have served, `error` the rendered derivation error.
+ */
+export interface InvalidPod {
+  nodeId: string;
+  podName: string;
+  listen: string;
+  error: string;
+}
+
+/**
  * `waiting_for_server_ids` are servers whose applied config does not yet serve a
  * listener this server's ideal config points at.
+ *
+ * `derive_error` is a whole-server derivation failure: nothing was published for
+ * this server at all. `invalid_pods` is the per-pod counterpart: only those pods
+ * failed, the rest of the server's config was derived and published normally,
+ * and each listed pod keeps whatever listener shape it was already serving. A
+ * server-level failure leaves `invalid_pods` empty.
  */
 export interface GetServerRolloutStatusReply {
   desired: ConfigSnapshot | undefined;
@@ -818,6 +835,7 @@ export interface GetServerRolloutStatusReply {
   waitingForServerIds: string[];
   derivationPending: boolean;
   lastSeenAt: string;
+  invalidPods: InvalidPod[];
 }
 
 /**
@@ -6148,6 +6166,122 @@ export const GetServerRolloutStatusRequest: MessageFns<GetServerRolloutStatusReq
   },
 };
 
+function createBaseInvalidPod(): InvalidPod {
+  return { nodeId: "", podName: "", listen: "", error: "" };
+}
+
+export const InvalidPod: MessageFns<InvalidPod> = {
+  encode(message: InvalidPod, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.nodeId !== "") {
+      writer.uint32(10).string(message.nodeId);
+    }
+    if (message.podName !== "") {
+      writer.uint32(18).string(message.podName);
+    }
+    if (message.listen !== "") {
+      writer.uint32(26).string(message.listen);
+    }
+    if (message.error !== "") {
+      writer.uint32(34).string(message.error);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InvalidPod {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInvalidPod();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.nodeId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.podName = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.listen = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.error = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InvalidPod {
+    return {
+      nodeId: isSet(object.nodeId)
+        ? globalThis.String(object.nodeId)
+        : isSet(object.node_id)
+        ? globalThis.String(object.node_id)
+        : "",
+      podName: isSet(object.podName)
+        ? globalThis.String(object.podName)
+        : isSet(object.pod_name)
+        ? globalThis.String(object.pod_name)
+        : "",
+      listen: isSet(object.listen) ? globalThis.String(object.listen) : "",
+      error: isSet(object.error) ? globalThis.String(object.error) : "",
+    };
+  },
+
+  toJSON(message: InvalidPod): unknown {
+    const obj: any = {};
+    if (message.nodeId !== "") {
+      obj.nodeId = message.nodeId;
+    }
+    if (message.podName !== "") {
+      obj.podName = message.podName;
+    }
+    if (message.listen !== "") {
+      obj.listen = message.listen;
+    }
+    if (message.error !== "") {
+      obj.error = message.error;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<InvalidPod>): InvalidPod {
+    return InvalidPod.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<InvalidPod>): InvalidPod {
+    const message = createBaseInvalidPod();
+    message.nodeId = object.nodeId ?? "";
+    message.podName = object.podName ?? "";
+    message.listen = object.listen ?? "";
+    message.error = object.error ?? "";
+    return message;
+  },
+};
+
 function createBaseGetServerRolloutStatusReply(): GetServerRolloutStatusReply {
   return {
     desired: undefined,
@@ -6158,6 +6292,7 @@ function createBaseGetServerRolloutStatusReply(): GetServerRolloutStatusReply {
     waitingForServerIds: [],
     derivationPending: false,
     lastSeenAt: "",
+    invalidPods: [],
   };
 }
 
@@ -6186,6 +6321,9 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
     }
     if (message.lastSeenAt !== "") {
       writer.uint32(66).string(message.lastSeenAt);
+    }
+    for (const v of message.invalidPods) {
+      InvalidPod.encode(v!, writer.uint32(74).fork()).join();
     }
     return writer;
   },
@@ -6261,6 +6399,14 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
           message.lastSeenAt = reader.string();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.invalidPods.push(InvalidPod.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6304,6 +6450,11 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
         : isSet(object.last_seen_at)
         ? globalThis.String(object.last_seen_at)
         : "",
+      invalidPods: globalThis.Array.isArray(object?.invalidPods)
+        ? object.invalidPods.map((e: any) => InvalidPod.fromJSON(e))
+        : globalThis.Array.isArray(object?.invalid_pods)
+        ? object.invalid_pods.map((e: any) => InvalidPod.fromJSON(e))
+        : [],
     };
   },
 
@@ -6333,6 +6484,9 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
     if (message.lastSeenAt !== "") {
       obj.lastSeenAt = message.lastSeenAt;
     }
+    if (message.invalidPods?.length) {
+      obj.invalidPods = message.invalidPods.map((e) => InvalidPod.toJSON(e));
+    }
     return obj;
   },
 
@@ -6355,6 +6509,7 @@ export const GetServerRolloutStatusReply: MessageFns<GetServerRolloutStatusReply
     message.waitingForServerIds = object.waitingForServerIds?.map((e) => e) || [];
     message.derivationPending = object.derivationPending ?? false;
     message.lastSeenAt = object.lastSeenAt ?? "";
+    message.invalidPods = object.invalidPods?.map((e) => InvalidPod.fromPartial(e)) || [];
     return message;
   },
 };

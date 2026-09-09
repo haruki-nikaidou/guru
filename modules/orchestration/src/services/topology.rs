@@ -1,9 +1,19 @@
 //! Topology rules.
 //!
 //! Every mutation runs this checker on the topology it *would* produce
-//! ([`CanvasTopology::project`]) and is rejected before anything is written, so the
-//! stored canvas is always derivable. The same checker answers `ValidateCanvas`,
-//! where warnings are reported alongside errors.
+//! ([`CanvasTopology::project`]) and is rejected before anything is written. The
+//! same checker answers `ValidateCanvas`, where warnings are reported alongside
+//! errors.
+//!
+//! What passes here is storable, not necessarily derivable: a half-drawn chain
+//! (a relay whose `listen` side is not fed yet, a load balancer with no connected
+//! members) is deliberately allowed so an operator can save mid-edit. Derivation
+//! reports such a pod in `invalid_pods` and leaves every other pod on the server
+//! alone — see [`crate::services::derive`].
+//!
+//! A rule belongs here only when the shape is unsatisfiable no matter what else
+//! the operator draws; anything that a later edit can complete belongs in the
+//! per-pod report instead.
 
 use crate::entities::surreal::connection::{EdgeConnectionEntity, EdgeConnectionId};
 use crate::entities::surreal::node::{NodeEntity, NodeId, NodeSpec, NodeWithPorts, RelayProtocol};
