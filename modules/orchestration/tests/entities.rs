@@ -22,10 +22,11 @@ use orchestration::entities::surreal::revision::{
     PruneServerRevisionsBelow, RecordServerConfigRevision,
 };
 use orchestration::entities::surreal::server::{
-    DeleteServerIpRow, DeleteServerRow, FindServerById, FindServerByRefreshKeyDigest,
-    FindServerIpById, ListServerIpsByCanvas, ListServerWatchState, ListServersByCanvas,
-    MarkServerApplied, MoveServerPosition, RotateServerRefreshKey, ServerIpv6Resolve,
-    SetServerApplyError, SetServerDesiredRevision, UpdateServerSettings,
+    ClaimServerWatchSession, DeleteServerIpRow, DeleteServerRow, FindServerById,
+    FindServerByRefreshKeyDigest, FindServerIpById, ListServerIpsByCanvas, ListServerWatchState,
+    ListServersByCanvas, MarkServerApplied, MoveServerPosition, ReleaseServerWatchSession,
+    RenewServerWatchSession, RotateServerRefreshKey, ServerIpv6Resolve, SetServerApplyError,
+    SetServerDesiredRevision, UpdateServerSettings,
 };
 use orchestration::entities::surreal::topology::{
     FindCanvasOfServer, LoadCanvasContents, LoadCanvasTopology,
@@ -134,14 +135,18 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
     assert!(row.last_apply_error.is_none());
 
     // Refresh keys rotate, and lookup is by digest.
-    let generation = sp
+    let start = chrono::Utc::now();
+    let lease = chrono::TimeDelta::seconds(30);
+    let row = sp
         .process(RotateServerRefreshKey {
             server: s.id.clone(),
             digest: "digest-1".to_string(),
-            now: chrono::Utc::now(),
+            now: start,
+            lease_until: start + lease,
         })
-        .await?;
-    assert_eq!(generation, 1);
+        .await?
+        .expect("the first registration takes the free session");
+    assert_eq!(row.refresh_key_generation, 1);
     let found = sp
         .process(FindServerByRefreshKeyDigest {
             digest: "digest-1".to_string(),
@@ -150,14 +155,62 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
         .unwrap();
     assert_eq!(found.id.0, s.id.0);
     assert!(found.last_seen_at.is_some());
-    let generation = sp
+
+    // A contender is refused while the session lease is still alive.
+    assert!(
+        sp.process(RotateServerRefreshKey {
+            server: s.id.clone(),
+            digest: "digest-contender".to_string(),
+            now: start + chrono::TimeDelta::seconds(5),
+            lease_until: start + chrono::TimeDelta::seconds(35),
+        })
+        .await?
+        .is_none(),
+        "a live session must not be stolen by another registration"
+    );
+    assert!(
+        sp.process(FindServerByRefreshKeyDigest {
+            digest: "digest-1".to_string()
+        })
+        .await?
+        .is_some(),
+        "the refused registration left the incumbent's key in place"
+    );
+
+    // A heartbeat keeps ownership; a stale epoch cannot renew.
+    assert!(
+        sp.process(RenewServerWatchSession {
+            server: s.id.clone(),
+            generation: 1,
+            epoch: 0,
+            now: start + chrono::TimeDelta::seconds(10),
+            lease_until: start + chrono::TimeDelta::seconds(40),
+        })
+        .await?
+    );
+    assert!(
+        !sp.process(RenewServerWatchSession {
+            server: s.id.clone(),
+            generation: 1,
+            epoch: 7,
+            now: start + chrono::TimeDelta::seconds(10),
+            lease_until: start + chrono::TimeDelta::seconds(40),
+        })
+        .await?,
+        "a fenced-out session must not be able to hold the lease"
+    );
+
+    // Once the lease lapses the server can be taken over.
+    let row = sp
         .process(RotateServerRefreshKey {
             server: s.id.clone(),
             digest: "digest-2".to_string(),
-            now: chrono::Utc::now(),
+            now: start + chrono::TimeDelta::seconds(41),
+            lease_until: start + chrono::TimeDelta::seconds(71),
         })
-        .await?;
-    assert_eq!(generation, 2);
+        .await?
+        .expect("a lapsed lease releases the server");
+    assert_eq!(row.refresh_key_generation, 2);
     assert!(
         sp.process(FindServerByRefreshKeyDigest {
             digest: "digest-1".to_string()
@@ -167,6 +220,45 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
         "the superseded digest must no longer resolve"
     );
 
+    // Claiming a stream fences the previous one and releasing frees the server.
+    let claimed = sp
+        .process(ClaimServerWatchSession {
+            server: s.id.clone(),
+            generation: 2,
+            now: start + chrono::TimeDelta::seconds(42),
+            lease_until: start + chrono::TimeDelta::seconds(72),
+        })
+        .await?
+        .expect("the current generation may claim the stream");
+    assert_eq!(claimed.watch_epoch, 1);
+    assert!(
+        sp.process(ClaimServerWatchSession {
+            server: s.id.clone(),
+            generation: 1,
+            now: start + chrono::TimeDelta::seconds(42),
+            lease_until: start + chrono::TimeDelta::seconds(72),
+        })
+        .await?
+        .is_none(),
+        "a superseded generation must not claim a stream"
+    );
+    sp.process(ReleaseServerWatchSession {
+        server: s.id.clone(),
+        generation: 2,
+        epoch: 1,
+    })
+    .await?;
+    let row = sp
+        .process(RotateServerRefreshKey {
+            server: s.id.clone(),
+            digest: "digest-3".to_string(),
+            now: start + chrono::TimeDelta::seconds(43),
+            lease_until: start + chrono::TimeDelta::seconds(73),
+        })
+        .await?
+        .expect("a released session lets the next worker register at once");
+    assert_eq!(row.refresh_key_generation, 3);
+
     let watch = sp
         .process(ListServerWatchState {
             servers: vec![s.id.clone()],
@@ -174,7 +266,8 @@ async fn server_lifecycle_and_rollout_columns() -> TestResult {
         .await?;
     assert_eq!(watch.len(), 1);
     assert_eq!(watch[0].desired_revision, 4);
-    assert_eq!(watch[0].refresh_key_generation, 2);
+    assert_eq!(watch[0].refresh_key_generation, 3);
+    assert_eq!(watch[0].watch_epoch, 1);
 
     assert_eq!(
         sp.process(ListServersByCanvas {

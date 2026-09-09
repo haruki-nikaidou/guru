@@ -4,6 +4,23 @@
 //! process, so an in-process broadcast alone can never observe a new revision. The
 //! poller closes that gap; when AMQP fan-out lands it replaces the poller without
 //! touching the hub or the stream handler.
+//!
+//! # One session per server
+//!
+//! Exactly one worker owns a server at a time, and ownership is global rather than
+//! per master replica because both halves of it live on the server row:
+//!
+//! - `refresh_key_generation` is bumped by `Register`, `watch_epoch` by every stream
+//!   claim. The pair is a [`WatchFence`]: a stream is authoritative exactly while
+//!   the row still carries the pair it won, and the fence only moves forward.
+//! - `session_lease_until` is taken by `Register`, refreshed by the live stream's
+//!   heartbeat and dropped when that stream ends. `Register` is refused while the
+//!   lease is alive, so two workers pointed at one server cannot take turns
+//!   stealing it; takeover waits for the incumbent to release or to stop
+//!   heartbeating (see [`SessionLease`]).
+//!
+//! The hub only mirrors that state so a fenced-out stream dies immediately instead
+//! of at the next poll. The database, not this process, is the source of truth.
 
 use crate::entities::surreal::server::{ListServerWatchState, ServerWatchState};
 use crate::utils::ids::record_key;
@@ -17,18 +34,62 @@ use wakuwaku::surreal::SurrealProcessor;
 
 const CHANNEL_CAPACITY: usize = 8;
 
+/// How long a worker session owns its server without a heartbeat, and how often a
+/// live stream refreshes that ownership.
+///
+/// The lease is what keeps two workers configured with the same `server_id` from
+/// trading the server back and forth: the incumbent renews while its stream lives,
+/// and a contender's `Register` is refused until the lease lapses (crash) or the
+/// stream releases it (clean restart).
+#[derive(Debug, Clone, Copy)]
+pub struct SessionLease {
+    pub ttl: Duration,
+    pub heartbeat: Duration,
+}
+
+impl Default for SessionLease {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(30),
+            heartbeat: Duration::from_secs(10),
+        }
+    }
+}
+
+impl SessionLease {
+    /// The deadline a session taken at `now` gets.
+    pub fn until(&self, now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+        let ttl = chrono::TimeDelta::from_std(self.ttl).unwrap_or(chrono::TimeDelta::MAX);
+        now.checked_add_signed(ttl)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+    }
+}
+
+/// Identifies the one live watch session of a server.
+///
+/// Both halves live on the server row: `generation` is bumped by every
+/// registration, `epoch` by every stream claim. Ordering is lexicographic, which
+/// makes the fence monotonic across master replicas — a stream is authoritative
+/// exactly while the row still carries its own pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WatchFence {
+    pub generation: i64,
+    pub epoch: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSignal {
     Revision(i64),
-    /// Another registration superseded the refresh key this stream authenticated with.
-    Superseded,
+    /// The authoritative session moved on; every stream whose fence differs from
+    /// the carried one must end.
+    Fenced(WatchFence),
 }
 
 struct Entry {
     tx: broadcast::Sender<AgentSignal>,
     subscribers: usize,
     last_revision: i64,
-    generation: i64,
+    fence: WatchFence,
 }
 
 #[derive(Clone, Default)]
@@ -38,6 +99,10 @@ pub struct WatchHub {
 
 pub struct WatchSubscription {
     pub rx: broadcast::Receiver<AgentSignal>,
+    /// The newest revision the hub knows about, which can be ahead of the row the
+    /// subscriber read: a poll that landed between that read and this subscription
+    /// has already been broadcast and would otherwise never be repeated.
+    pub last_revision: i64,
     server_key: String,
     entries: Arc<Mutex<HashMap<String, Entry>>>,
 }
@@ -62,12 +127,16 @@ impl Drop for WatchSubscription {
 
 impl WatchHub {
     /// Registers interest in one server; the guard deregisters on drop.
+    ///
+    /// Returns `None` when `fence` is already outranked — a claim that lost a race
+    /// against a newer registration or a newer stream must never pull the hub's
+    /// fence backwards, or it would resurrect a session the database has retired.
     pub fn subscribe(
         &self,
         server_key: &str,
-        generation: i64,
+        fence: WatchFence,
         last_revision: i64,
-    ) -> WatchSubscription {
+    ) -> Option<WatchSubscription> {
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
@@ -78,32 +147,54 @@ impl WatchHub {
                 tx,
                 subscribers: 0,
                 last_revision,
-                generation,
+                fence,
             }
         });
+        if entry.fence > fence {
+            return None;
+        }
+        if entry.fence < fence {
+            entry.fence = fence;
+            // Ends the streams this claim replaces before the new receiver exists.
+            let _ = entry.tx.send(AgentSignal::Fenced(fence));
+        }
         entry.subscribers = entry.subscribers.saturating_add(1);
-        entry.generation = generation;
         entry.last_revision = entry.last_revision.max(last_revision);
+        let last_revision = entry.last_revision;
         let rx = entry.tx.subscribe();
         drop(entries);
-        WatchSubscription {
+        Some(WatchSubscription {
             rx,
+            last_revision,
             server_key: server_key.to_string(),
             entries: self.entries.clone(),
-        }
+        })
     }
 
-    /// Called by `RegisterWorker` in this process for instant supersession.
+    /// Called by `RegisterWorker` in this process for instant supersession. A fresh
+    /// generation has not claimed a stream yet, hence epoch zero.
     pub fn supersede(&self, server_key: &str, generation: i64) {
+        self.advance_fence(
+            server_key,
+            WatchFence {
+                generation,
+                epoch: 0,
+            },
+        );
+    }
+
+    /// Moves the fence forward and ends every stream it retires. Older fences are
+    /// stale reads and are ignored.
+    fn advance_fence(&self, server_key: &str, fence: WatchFence) {
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
         };
         if let Some(entry) = entries.get_mut(server_key)
-            && entry.generation < generation
+            && entry.fence < fence
         {
-            entry.generation = generation;
-            let _ = entry.tx.send(AgentSignal::Superseded);
+            entry.fence = fence;
+            let _ = entry.tx.send(AgentSignal::Fenced(fence));
         }
     }
 
@@ -120,6 +211,10 @@ impl WatchHub {
 
     pub(crate) fn publish(&self, state: &ServerWatchState) {
         let key = record_key(&state.id.0);
+        let fence = WatchFence {
+            generation: state.refresh_key_generation,
+            epoch: state.watch_epoch,
+        };
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
@@ -127,9 +222,14 @@ impl WatchHub {
         let Some(entry) = entries.get_mut(&key) else {
             return;
         };
-        if state.refresh_key_generation != entry.generation {
-            entry.generation = state.refresh_key_generation;
-            let _ = entry.tx.send(AgentSignal::Superseded);
+        // One snapshot, one epoch, one lock: a poll that is behind the current
+        // session says nothing about it, and the next tick re-reads anyway.
+        if fence < entry.fence {
+            return;
+        }
+        if fence > entry.fence {
+            entry.fence = fence;
+            let _ = entry.tx.send(AgentSignal::Fenced(fence));
             return;
         }
         if state.desired_revision > entry.last_revision {
@@ -165,5 +265,87 @@ pub async fn run_poller(
             }
             Err(e) => tracing::error!(error = %e, "watch poll failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn state(key: &str, desired: i64, fence: WatchFence) -> ServerWatchState {
+        ServerWatchState {
+            id: crate::utils::ids::server_id(key),
+            desired_revision: desired,
+            refresh_key_generation: fence.generation,
+            watch_epoch: fence.epoch,
+        }
+    }
+
+    fn fence(generation: i64, epoch: i64) -> WatchFence {
+        WatchFence { generation, epoch }
+    }
+
+    #[test]
+    fn a_new_session_inherits_a_revision_broadcast_before_it_subscribed() {
+        let hub = WatchHub::default();
+        let first = hub.subscribe("s", fence(1, 1), 5).unwrap();
+        hub.publish(&state("s", 7, fence(1, 1)));
+        // The row this session claimed can predate that poll; without inheriting the
+        // hub's revision it would sit on 5 until the next unrelated edit.
+        let second = hub.subscribe("s", fence(1, 2), 5).unwrap();
+        assert_eq!(second.last_revision, 7);
+        drop(first);
+    }
+
+    #[test]
+    fn an_outranked_claim_is_refused_and_leaves_the_fence_alone() {
+        let hub = WatchHub::default();
+        let mut live = hub.subscribe("s", fence(2, 3), 0).unwrap();
+        assert!(hub.subscribe("s", fence(2, 2), 0).is_none());
+        assert!(hub.subscribe("s", fence(1, 9), 0).is_none());
+        // The live session was never told to go away.
+        assert!(matches!(
+            live.rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn a_newer_fence_ends_the_session_it_replaces() {
+        let hub = WatchHub::default();
+        let mut first = hub.subscribe("s", fence(1, 1), 0).unwrap();
+        let _second = hub.subscribe("s", fence(1, 2), 0).unwrap();
+        assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Fenced(fence(1, 2))));
+
+        // A registration in this process, and a poll that saw one elsewhere.
+        hub.supersede("s", 2);
+        assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Fenced(fence(2, 0))));
+        hub.publish(&state("s", 3, fence(2, 1)));
+        assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Fenced(fence(2, 1))));
+        // The fence advance is the whole message: revisions belong to the session
+        // that now owns the server, and the next poll delivers them to it.
+        assert!(matches!(
+            first.rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        hub.publish(&state("s", 3, fence(2, 1)));
+        assert_eq!(first.rx.try_recv(), Ok(AgentSignal::Revision(3)));
+    }
+
+    #[test]
+    fn a_stale_poll_is_ignored_entirely() {
+        let hub = WatchHub::default();
+        let mut live = hub.subscribe("s", fence(3, 4), 0).unwrap();
+        // A snapshot from before this session was claimed: neither its fence nor its
+        // revision may be applied to the session that replaced it.
+        hub.publish(&state("s", 9, fence(2, 8)));
+        assert!(matches!(
+            live.rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        hub.publish(&state("s", 9, fence(3, 4)));
+        assert_eq!(live.rx.try_recv(), Ok(AgentSignal::Revision(9)));
     }
 }

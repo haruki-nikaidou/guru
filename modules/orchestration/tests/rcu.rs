@@ -63,23 +63,33 @@ async fn world() -> Result<World, Box<dyn std::error::Error>> {
         agents: AgentService {
             db: db.clone(),
             hub: Default::default(),
+            lease: Default::default(),
         },
         db,
     })
 }
 
 /// Acknowledges a server's current desired revision the way a worker would.
+///
+/// Registration happens once per server: a worker holds its session for as long as
+/// it lives, and a second registration would be refused while that session is.
 async fn ack_current(
     w: &World,
     server: &orchestration::entities::surreal::server::ServerId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    w.agents
-        .process(RegisterWorker {
-            actor: machine(),
-            server_id: server.clone(),
-            running_revision: 0,
-        })
-        .await?;
+    let registered =
+        w.db.process(FindServerById { id: server.clone() })
+            .await?
+            .is_some_and(|row| row.refresh_key_generation > 0);
+    if !registered {
+        w.agents
+            .process(RegisterWorker {
+                actor: machine(),
+                server_id: server.clone(),
+                running_revision: 0,
+            })
+            .await?;
+    }
     let row =
         w.db.process(FindServerById { id: server.clone() })
             .await?

@@ -134,6 +134,8 @@ impl Builder {
             last_apply_error: None,
             current_dynamic_refresh_key: None,
             refresh_key_generation: 0,
+            watch_epoch: 0,
+            session_lease_until: None,
             last_seen_at: None,
         });
         id
