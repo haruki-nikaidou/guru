@@ -2,7 +2,11 @@
 // for information about these interfaces
 declare global {
 	namespace App {
-		// interface Error {}
+		interface Error {
+			message: string;
+			/** Stable lookup key for `#lib/i18n/codes.ts`; `server_message` = show `message`. */
+			code?: string;
+		}
 		// interface Locals {}
 		// interface PageData {}
 		// interface PageState {}

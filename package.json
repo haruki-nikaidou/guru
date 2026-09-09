@@ -7,6 +7,9 @@
 		"typescript/*"
 	],
 	"scripts": {
+		"dev": "bun run --filter guru-frontend dev",
+		"build": "bun run --filter guru-frontend build",
+		"check:svelte": "bun run --filter guru-frontend check",
 		"generate:proto": "bun run --filter app-protobuf generate:proto",
 		"format": "biome format --write .",
 		"format:check": "biome format .",
