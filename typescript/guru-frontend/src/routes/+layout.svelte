@@ -1,5 +1,6 @@
 <script lang="ts">
 import { locales, localizeHref } from '#lib/paraglide/runtime';
+import { Toaster } from "$lib/components/ui/sonner/index.js";
 import { resolve } from '$app/paths';
 import { page } from '$app/state';
 import type { Path } from '$app/types';
@@ -10,6 +11,7 @@ let { children } = $props();
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
+<Toaster />
 {@render children()}
 
 <div style="display:none">
