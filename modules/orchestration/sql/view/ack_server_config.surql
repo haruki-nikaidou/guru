@@ -1,3 +1,12 @@
+-- Unlike `take_in_flight.surql`, this update carries no
+-- `(refresh_key_generation, watch_epoch)` predicate, deliberately: an ack arrives
+-- on a unary RPC authenticated by the refresh-key digest, and re-registration
+-- rotates that digest while incrementing `refresh_key_generation`
+-- (`sql/server/register_worker_session.surql`, lines 2-3), so a fenced-out worker
+-- cannot authenticate an ack at all. `take_in_flight` runs on behalf of a
+-- long-lived watch stream whose credential was validated once, at stream open, so
+-- it needs the predicate. The generation comparison at `services/agent.rs:128` is
+-- the fail-fast counterpart on this path.
 BEGIN TRANSACTION;
 LET $ok = IF $error = NONE {
     UPDATE orchestration_server_config_view

@@ -18,6 +18,8 @@ pub mod state;
 pub mod supervisor;
 pub mod tls;
 
+use std::sync::atomic::Ordering;
+
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// Default config path used by standalone mode when `--config` is absent.
@@ -26,6 +28,16 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/guru-worker/config.toml";
 pub fn init_tracing(level: &str) {
     let filter = tracing_subscriber::EnvFilter::new(level);
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// Logs a config's non-fatal warnings.
+///
+/// Parsing no longer reports them: `Config::from_toml_str` only parses and validates,
+/// so every caller that accepts a config logs its lint output itself.
+fn log_lint(cfg: &guru_worker_config::Config) {
+    for warning in cfg.lint() {
+        tracing::warn!(warning = %warning, "config lint");
+    }
 }
 
 /// Runs the worker until SIGTERM/SIGINT.
@@ -48,6 +60,7 @@ async fn run_standalone(cli: cli::Cli) -> Result<(), BoxError> {
     let cfg = guru_worker_config::Config::load(&path)?;
     init_tracing(&cfg.log.level);
     tracing::info!(path = %path.display(), "loaded config");
+    log_lint(&cfg);
 
     let mut sup = supervisor::Supervisor::new();
     sup.apply(&cfg)?;
@@ -61,6 +74,7 @@ async fn run_standalone(cli: cli::Cli) -> Result<(), BoxError> {
             _ = hup.recv() => {
                 match guru_worker_config::Config::load(&path) {
                     Ok(c) => {
+                        log_lint(&c);
                         if let Err(e) = sup.apply(&c) {
                             tracing::error!(error = %e, "reload apply failed; keeping running config");
                         } else {
@@ -79,21 +93,64 @@ async fn run_standalone(cli: cli::Cli) -> Result<(), BoxError> {
     Ok(())
 }
 
+/// Reads the operator API key from `GURU_API_KEY` or `--api-key-file`.
+///
+/// The key never appears on the command line, where `ps` would expose it to every
+/// local user. Exactly one of the two sources must be present.
+fn read_api_key(file: Option<&std::path::Path>) -> Result<String, BoxError> {
+    let from_env = std::env::var(cli::API_KEY_ENV)
+        .ok()
+        .filter(|key| !key.is_empty());
+    match (from_env, file) {
+        (Some(_), Some(_)) => Err(format!(
+            "agent mode takes the operator API key from either {} or --api-key-file, not both",
+            cli::API_KEY_ENV
+        )
+        .into()),
+        (Some(key), None) => Ok(key),
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--api-key-file {}: {e}", path.display()))?;
+            let key = text.trim_end().to_string();
+            if key.is_empty() {
+                return Err(format!("--api-key-file {} is empty", path.display()).into());
+            }
+            Ok(key)
+        }
+        (None, None) => Err(format!(
+            "agent mode requires the operator API key in {} or --api-key-file",
+            cli::API_KEY_ENV
+        )
+        .into()),
+    }
+}
+
 async fn run_agent(cli: cli::Cli, master: String) -> Result<(), BoxError> {
-    let (Some(api_key), Some(server_id)) = (cli.api_key.clone(), cli.server.clone()) else {
-        return Err("agent mode requires --api-key and --server".into());
+    let Some(server_id) = cli.server.clone() else {
+        return Err("agent mode requires --server".into());
     };
+    let api_key = read_api_key(cli.api_key_file.as_deref())?;
     init_tracing(&cli.log_level);
 
+    // What the worker reports as running: only a successful apply may advance it.
+    let applied_revision = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
     let sup = std::sync::Arc::new(tokio::sync::Mutex::new(supervisor::Supervisor::new()));
     if let Some(good) = state::load(&cli.state_dir) {
         match guru_worker_config::Config::from_toml_str(&good.toml) {
-            Ok(cfg) => match sup.lock().await.apply(&cfg) {
-                Ok(()) => {
-                    tracing::info!(revision = good.revision, "applied last-known-good config")
+            Ok(cfg) => {
+                for warning in cfg.lint() {
+                    tracing::warn!(revision = good.revision, warning = %warning, "config lint");
                 }
-                Err(e) => tracing::error!(error = %e, "last-known-good config failed to apply"),
-            },
+                match sup.lock().await.apply(&cfg) {
+                    Ok(()) => {
+                        applied_revision.store(good.revision, Ordering::Relaxed);
+                        tracing::info!(revision = good.revision, "applied last-known-good config")
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "last-known-good config failed to apply")
+                    }
+                }
+            }
             Err(e) => tracing::error!(error = %e, "last-known-good config is invalid"),
         }
     }
@@ -105,6 +162,7 @@ async fn run_agent(cli: cli::Cli, master: String) -> Result<(), BoxError> {
             api_key,
             server_id,
             state_dir: cli.state_dir.clone(),
+            applied_revision,
         },
         sup.clone(),
         shutdown.clone(),

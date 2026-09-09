@@ -3,6 +3,10 @@
 //! One file holds the revision and its TOML so the two can never disagree; it is
 //! written only after a config has been applied successfully, and replayed at
 //! startup so the data plane comes up even while the master is unreachable.
+//!
+//! It is a restart optimisation, not a record of what the worker is serving: the
+//! revision reported to the master comes from the last apply that actually
+//! succeeded in this process, and a failed write here never fails an apply.
 
 use crate::BoxError;
 use std::path::Path;

@@ -498,13 +498,12 @@ async fn a_protocol_change_on_a_referenced_listener_is_rejected() -> TestResult 
     // Feed osaka's pod from an Entry instead of the relay: same ip:port, but it
     // would become a raw listener while tokyo's running config still dials it as a
     // relay. The two cannot coexist on one worker, so there is no seamless path.
-    let edge =
-        w.db.process(
-            orchestration::entities::surreal::connection::ListEdgesByCanvas {
-                canvas: f.canvas.clone(),
-            },
-        )
-        .await?
+    let mut resp =
+        w.db.db()
+            .query("SELECT * FROM orchestration_edge_connection")
+            .await?;
+    let edge = resp
+        .take::<Vec<orchestration::entities::surreal::connection::EdgeConnectionEntity>>(0)?
         .into_iter()
         .find(|e| e.source.0 == f.osaka_hop_listen.0 && e.target.0 == f.to_osaka_listen.0)
         .expect("the relay feeds the osaka pod");

@@ -9,7 +9,7 @@ listen = "203.0.113.10:443"
 listen_as = "raw"
 
 [forwarding.to]
-type = "Exit"
+type = "exit"
 destination = "10.0.0.5:8080"
 
 [[forwarding]]
@@ -18,5 +18,5 @@ listen = "203.0.113.10:8443"
 listen_as = "raw"
 
 [forwarding.to]
-type = "Exit"
+type = "exit"
 destination = "10.0.0.5:8080"

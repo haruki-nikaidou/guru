@@ -91,7 +91,6 @@ impl TopologyProblem {
 #[error("{}", self.first.message)]
 pub struct TopologyError {
     pub first: TopologyProblem,
-    pub all: Vec<TopologyProblem>,
 }
 
 /// One pending change to a topology, used to validate before writing.
@@ -112,9 +111,6 @@ pub enum TopologyEdit {
     },
     RemoveIp {
         ip: crate::entities::surreal::server::ServerIpRecordId,
-    },
-    RemoveServer {
-        server: ServerId,
     },
     SetServerSettings {
         server: ServerId,
@@ -156,11 +152,6 @@ impl CanvasTopology {
                     let key = record_key(&ip.0);
                     out.ips.retain(|row| record_key(&row.id.0) != key);
                 }
-                TopologyEdit::RemoveServer { server } => {
-                    let key = record_key(&server.0);
-                    out.servers.retain(|s| record_key(&s.id.0) != key);
-                    out.ips.retain(|ip| record_key(&ip.server.0) != key);
-                }
                 TopologyEdit::SetServerSettings {
                     server,
                     ipv6_resolve,
@@ -198,16 +189,14 @@ pub fn analyze(topology: &CanvasTopology) -> Vec<TopologyProblem> {
     errors
 }
 
-/// The error is boxed: it carries every problem found, which is far larger than
-/// the success path.
+/// The error is boxed: it carries the offending problem with its node, edge, and
+/// port lists, which is far larger than the success path.
 pub fn ensure_valid(topology: &CanvasTopology) -> Result<(), Box<TopologyError>> {
-    let all = analyze(topology);
-    match all
-        .iter()
+    match analyze(topology)
+        .into_iter()
         .find(|p| p.severity == ProblemSeverity::Error)
-        .cloned()
     {
-        Some(first) => Err(Box::new(TopologyError { first, all })),
+        Some(first) => Err(Box::new(TopologyError { first })),
         None => Ok(()),
     }
 }

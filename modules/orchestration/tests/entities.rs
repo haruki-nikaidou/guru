@@ -10,17 +10,18 @@ use orchestration::entities::surreal::canvas::{
     DeleteCanvasRow, FindCanvasById, ListCanvases, UpdateCanvasMeta,
 };
 use orchestration::entities::surreal::connection::{
-    ConnectPorts, DeleteEdgeRow, FindEdgeById, ListEdgesByCanvas,
+    ConnectPorts, DeleteEdgeRow, EdgeConnectionId, FindEdgeById,
 };
 use orchestration::entities::surreal::node::{
     DeleteNodeRow, ExitConfig, FindNodeById, FindNodeWithPorts, NodeSpec, UpdateNodeMetaRow,
     UpdateNodeSpecRow,
 };
+use orchestration::entities::surreal::port::PortId;
 use orchestration::entities::surreal::server::{
     ClaimServerWatchSession, DeleteServerIpRow, DeleteServerRow, FindServerById,
     FindServerByRefreshKeyDigest, FindServerIpById, ListServerIpsByCanvas, ListServersByCanvas,
     MoveServerPosition, RegisterWorkerSession, ReleaseServerWatchSession, RenewServerWatchSession,
-    ServerIpv6Resolve, UpdateServerSettings,
+    ServerIpRecordId, ServerIpv6Resolve, UpdateServerSettings,
 };
 use orchestration::entities::surreal::topology::{
     FindCanvasOfServer, LoadCanvasContents, LoadCanvasTopology,
@@ -59,7 +60,7 @@ async fn canvas_crud_round_trip() -> TestResult {
     );
 
     let s = server(&sp, &c, "tokyo").await?;
-    server_ip(&sp, &s, "203.0.113.10").await?;
+    let ip = server_ip(&sp, &s, "203.0.113.10").await?;
     sp.process(DeleteCanvasRow { id: c.id.clone() }).await?;
     assert!(sp.process(FindCanvasById { id: c.id }).await?.is_none());
     assert!(
@@ -71,6 +72,12 @@ async fn canvas_crud_round_trip() -> TestResult {
         "the cascade takes the config view with the server"
     );
     assert!(sp.process(FindServerById { id: s.id }).await?.is_none());
+    // By id, not through `server.canvas`: a dereference of a deleted parent is
+    // NONE, so a canvas-scoped query cannot see the rows the cascade orphaned.
+    assert!(
+        sp.process(FindServerIpById { id: ip.id }).await?.is_none(),
+        "and the ip records of the servers it took with it"
+    );
     Ok(())
 }
 
@@ -399,6 +406,14 @@ async fn take_in_flight_and_ack_move_the_slots() -> TestResult {
         .await?,
         "an ack for a revision that is not in flight changes nothing"
     );
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .unwrap();
+    assert_eq!(view.failed_revision, Some(2), "and leaves the slots alone");
+    assert_eq!(view.applied.map(|s| s.revision), Some(1));
     Ok(())
 }
 
@@ -419,15 +434,15 @@ async fn a_new_stream_is_offered_what_the_previous_one_never_acked() -> TestResu
         })
         .await?
         .unwrap();
-    assert!(
-        sp.process(TakeInFlight {
+    let taken = sp
+        .process(TakeInFlight {
             server: s.id.clone(),
             generation: 0,
             epoch: claimed.watch_epoch,
         })
         .await?
-        .is_some()
-    );
+        .expect("the first stream is handed the snapshot");
+    assert_eq!(taken.revision, 1);
 
     // Its replacement must not be left waiting for an ack that can never come.
     let claimed = sp
@@ -452,7 +467,7 @@ async fn a_new_stream_is_offered_what_the_previous_one_never_acked() -> TestResu
 }
 
 #[tokio::test]
-async fn register_promotes_the_running_revision() -> TestResult {
+async fn register_promotes_a_reported_desired_revision() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
     let s = server(&sp, &c, "tokyo").await?;
@@ -483,14 +498,117 @@ async fn register_promotes_the_running_revision() -> TestResult {
         })
         .await?
         .unwrap();
-    assert_eq!(
-        view.applied.map(|s| s.revision),
-        Some(3),
-        "a worker that reports the in-flight revision is running it"
+    assert!(
+        view.apply_error.is_none(),
+        "a revision the master derived is accounted for: {:?}",
+        view.apply_error
     );
     assert!(
         view.in_flight.is_none(),
         "registration clears whatever the previous session had in flight"
+    );
+    assert_eq!(
+        view.applied.map(|s| s.revision),
+        Some(3),
+        "a worker that reports the desired revision is running it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn register_promotes_a_reported_in_flight_revision() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    seed_desired(&sp, &s.id, 1).await?;
+    sp.process(TakeInFlight {
+        server: s.id.clone(),
+        generation: 0,
+        epoch: 0,
+    })
+    .await?
+    .expect("the snapshot is in flight when the worker restarts");
+    // A derivation pass moves on while the worker is away, so what it reports on
+    // its way back is the in-flight revision and no longer the desired one.
+    seed_desired(&sp, &s.id, 2).await?;
+
+    let now = chrono::Utc::now();
+    sp.process(RegisterWorkerSession {
+        server: s.id.clone(),
+        canvas: c.id.clone(),
+        digest: "digest-1".to_string(),
+        now,
+        lease_until: now + chrono::TimeDelta::seconds(30),
+        running_revision: 1,
+    })
+    .await?
+    .expect("the free session is taken");
+
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .unwrap();
+    assert!(
+        view.apply_error.is_none(),
+        "the in-flight revision is one the master handed out: {:?}",
+        view.apply_error
+    );
+    assert!(
+        view.in_flight.is_none(),
+        "registration clears whatever the previous session had in flight"
+    );
+    assert_eq!(
+        view.applied.map(|s| s.revision),
+        Some(1),
+        "a worker that reports the in-flight revision is running it"
+    );
+    assert_eq!(
+        view.desired.map(|s| s.revision),
+        Some(2),
+        "and the newer derivation is still there to converge to"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn register_rejects_an_unknown_running_revision() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    seed_desired(&sp, &s.id, 3).await?;
+
+    let now = chrono::Utc::now();
+    sp.process(RegisterWorkerSession {
+        server: s.id.clone(),
+        canvas: c.id.clone(),
+        digest: "digest-1".to_string(),
+        now,
+        lease_until: now + chrono::TimeDelta::seconds(30),
+        running_revision: 7,
+    })
+    .await?
+    .expect("the free session is taken");
+
+    let view = sp
+        .process(FindServerConfigView {
+            server: s.id.clone(),
+        })
+        .await?
+        .unwrap();
+    assert!(
+        view.applied.is_none(),
+        "the master never advances applied to a revision it cannot account for"
+    );
+    assert_eq!(
+        view.apply_error.as_deref(),
+        Some("running revision 7 unknown")
+    );
+    assert_eq!(
+        view.desired.map(|s| s.revision),
+        Some(3),
+        "and leaves the derivation it does know about alone"
     );
     Ok(())
 }
@@ -503,7 +621,7 @@ async fn server_ip_records_are_scoped_to_their_canvas() -> TestResult {
     let s = server(&sp, &c, "tokyo").await?;
     let s2 = server(&sp, &other, "osaka").await?;
     let ip = server_ip(&sp, &s, "203.0.113.10").await?;
-    server_ip(&sp, &s2, "198.51.100.10").await?;
+    let ip2 = server_ip(&sp, &s2, "198.51.100.10").await?;
 
     let ips = sp
         .process(ListServerIpsByCanvas {
@@ -539,11 +657,20 @@ async fn server_ip_records_are_scoped_to_their_canvas() -> TestResult {
         "deleting a server deletes its config view"
     );
     assert!(sp.process(FindServerById { id: s2.id }).await?.is_none());
+    // By id and unfiltered: `ListServerIpsByCanvas` reaches the canvas through
+    // `server`, which dereferences to NONE once the server row is gone, so it
+    // can never see an ip record the cascade left behind.
     assert!(
-        sp.process(ListServerIpsByCanvas { canvas: other.id })
-            .await?
-            .is_empty(),
+        sp.process(FindServerIpById { id: ip2.id }).await?.is_none(),
         "deleting a server deletes its ip records"
+    );
+    let mut resp = sp
+        .db()
+        .query("SELECT VALUE id FROM server_ip_record")
+        .await?;
+    assert!(
+        resp.take::<Vec<ServerIpRecordId>>(0)?.is_empty(),
+        "and leaves no orphaned ip rows in the table"
     );
     Ok(())
 }
@@ -573,16 +700,56 @@ async fn create_node_writes_node_and_ports_together() -> TestResult {
         other => panic!("expected pod spec, got {other:?}"),
     }
 
+    let before = sp
+        .process(FindCanvasById { id: c.id.clone() })
+        .await?
+        .unwrap()
+        .generation;
     let meta = sp
         .process(UpdateNodeMetaRow {
             id: pod.node.id.clone(),
+            canvas: c.id.clone(),
             name: "edge".to_string(),
             comment: "renamed".to_string(),
-            position: pos(3, 4),
+            position: Some(pos(3, 4)),
         })
         .await?;
-    assert_eq!(meta.name, "edge");
-    assert_eq!(meta.position, pos(3, 4));
+    assert_eq!(meta.node.name, "edge");
+    assert_eq!(meta.node.position, pos(3, 4));
+    // The name is the forwarding tag in the derived config, so the rename has to
+    // schedule a derivation, and the query itself has to be what decides that.
+    assert!(meta.renamed, "the rename must be reported by the query");
+    let after_rename = sp
+        .process(FindCanvasById { id: c.id.clone() })
+        .await?
+        .unwrap()
+        .generation;
+    assert!(
+        after_rename > before,
+        "a rename must bump the canvas generation: {before} -> {after_rename}"
+    );
+
+    // A move that carries the same name is invisible to workers: no rename, no
+    // generation bump, so it does not schedule a pointless derivation.
+    let moved = sp
+        .process(UpdateNodeMetaRow {
+            id: pod.node.id.clone(),
+            canvas: c.id.clone(),
+            name: "edge".to_string(),
+            comment: "moved".to_string(),
+            position: Some(pos(9, 9)),
+        })
+        .await?;
+    assert!(!moved.renamed);
+    assert_eq!(moved.node.position, pos(9, 9));
+    assert_eq!(
+        sp.process(FindCanvasById { id: c.id.clone() })
+            .await?
+            .unwrap()
+            .generation,
+        after_rename,
+        "a move must not bump the canvas generation"
+    );
     Ok(())
 }
 
@@ -618,12 +785,31 @@ async fn deleting_a_node_removes_its_ports_and_edges() -> TestResult {
             .is_none()
     );
     assert!(sp.process(FindEdgeById { id: edge.id }).await?.is_none());
+    // Unfiltered on purpose: every canvas-scoped port or edge query reaches the
+    // canvas through `owner`/`in`, which dereferences to NONE once the node row
+    // is gone, so rows the cascade orphaned are invisible to them.
+    let mut resp = sp
+        .db()
+        .query("SELECT VALUE id FROM orchestration_port")
+        .await?;
+    let ports_left = resp.take::<Vec<PortId>>(0)?;
+    assert_eq!(
+        ports_left.len(),
+        1,
+        "the deleted node's ports are gone from the table, not just from its canvas"
+    );
+    assert_eq!(
+        ports_left[0].0,
+        port_of(&exit, "destination").0,
+        "and the port that survives is the untouched node's"
+    );
+    let mut resp = sp
+        .db()
+        .query("SELECT VALUE id FROM orchestration_edge_connection")
+        .await?;
     assert!(
-        sp.process(ListEdgesByCanvas {
-            canvas: c.id.clone()
-        })
-        .await?
-        .is_empty()
+        resp.take::<Vec<EdgeConnectionId>>(0)?.is_empty(),
+        "the edge that hung off those ports is gone from the table too"
     );
     let topology = sp
         .process(LoadCanvasTopology {
@@ -631,11 +817,6 @@ async fn deleting_a_node_removes_its_ports_and_edges() -> TestResult {
         })
         .await?;
     assert_eq!(topology.nodes.len(), 1);
-    assert_eq!(
-        topology.nodes[0].ports.len(),
-        1,
-        "the deleted node's ports are gone"
-    );
     assert_eq!(
         sp.process(FindCanvasById { id: c.id })
             .await?

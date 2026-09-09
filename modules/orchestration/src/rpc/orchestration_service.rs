@@ -42,12 +42,18 @@ fn position_to_proto(position: CanvasUiPosition) -> pb::CanvasUiPosition {
     }
 }
 
-fn position_from_proto(position: Option<pb::CanvasUiPosition>) -> CanvasUiPosition {
-    let position = position.unwrap_or_default();
-    CanvasUiPosition {
+/// An unset `position` means "not given": callers that may leave the node where it
+/// is keep the `None`, callers that must have a position default it themselves.
+fn position_from_proto(position: Option<pb::CanvasUiPosition>) -> Option<CanvasUiPosition> {
+    position.map(|position| CanvasUiPosition {
         x: position.x,
         y: position.y,
-    }
+    })
+}
+
+/// The position as sent, or the canvas origin when the field is unset.
+fn position_or_origin(position: Option<pb::CanvasUiPosition>) -> CanvasUiPosition {
+    position_from_proto(position).unwrap_or(CanvasUiPosition { x: 0, y: 0 })
 }
 
 fn canvas_to_proto(canvas: &CanvasEntity) -> pb::Canvas {
@@ -77,13 +83,18 @@ fn ipv6_to_proto(value: ServerIpv6Resolve) -> i32 {
     .into()
 }
 
-fn ipv6_from_proto(value: i32) -> ServerIpv6Resolve {
+fn ipv6_from_proto(value: i32) -> Result<ServerIpv6Resolve, Status> {
     match pb::Ipv6Resolve::try_from(value) {
-        Ok(pb::Ipv6Resolve::Ipv6Required) => ServerIpv6Resolve::Required,
-        Ok(pb::Ipv6Resolve::Ipv6Preferred) => ServerIpv6Resolve::Preferred,
-        Ok(pb::Ipv6Resolve::Ipv6Forbidden) => ServerIpv6Resolve::Forbidden,
+        Ok(pb::Ipv6Resolve::Ipv6Required) => Ok(ServerIpv6Resolve::Required),
+        Ok(pb::Ipv6Resolve::Ipv6Preferred) => Ok(ServerIpv6Resolve::Preferred),
+        Ok(pb::Ipv6Resolve::Ipv6Forbidden) => Ok(ServerIpv6Resolve::Forbidden),
         // Unspecified means "the default policy".
-        _ => ServerIpv6Resolve::Tolerated,
+        Ok(pb::Ipv6Resolve::Ipv6Tolerated | pb::Ipv6Resolve::Unspecified) => {
+            Ok(ServerIpv6Resolve::Tolerated)
+        }
+        Err(_) => Err(Status::invalid_argument(format!(
+            "ipv6_resolve: unknown value {value}"
+        ))),
     }
 }
 
@@ -134,11 +145,15 @@ fn proxy_to_proto(value: Option<ProxyProtocolVersion>) -> i32 {
     .into()
 }
 
-fn proxy_from_proto(value: i32) -> Option<ProxyProtocolVersion> {
+fn proxy_from_proto(field: &str, value: i32) -> Result<Option<ProxyProtocolVersion>, Status> {
     match pb::ProxyProtocolVersion::try_from(value) {
-        Ok(pb::ProxyProtocolVersion::ProxyV1) => Some(ProxyProtocolVersion::V1),
-        Ok(pb::ProxyProtocolVersion::ProxyV2) => Some(ProxyProtocolVersion::V2),
-        _ => None,
+        Ok(pb::ProxyProtocolVersion::ProxyV1) => Ok(Some(ProxyProtocolVersion::V1)),
+        Ok(pb::ProxyProtocolVersion::ProxyV2) => Ok(Some(ProxyProtocolVersion::V2)),
+        // Unspecified means "no proxy protocol".
+        Ok(pb::ProxyProtocolVersion::Unspecified) => Ok(None),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "{field}: unknown value {value}"
+        ))),
     }
 }
 
@@ -213,11 +228,21 @@ fn spec_from_proto(spec: Option<pb::NodeSpec>) -> Result<NodeSpec, Status> {
     Ok(match spec {
         Spec::Pod(cfg) => NodeSpec::Pod(PodConfig {
             ip: ids::server_ip_id(&cfg.ip_record_id),
-            port: u16::try_from(cfg.port)
-                .map_err(|_| Status::invalid_argument("port out of range"))?,
+            port: match u16::try_from(cfg.port) {
+                Ok(port) if port != 0 => port,
+                _ => {
+                    return Err(Status::invalid_argument(format!(
+                        "port: {} is out of range (1-65535)",
+                        cfg.port
+                    )));
+                }
+            },
         }),
         Spec::Entry(cfg) => NodeSpec::Entry(EntryConfig {
-            receive_proxy_protocol: proxy_from_proto(cfg.receive_proxy_protocol),
+            receive_proxy_protocol: proxy_from_proto(
+                "receive_proxy_protocol",
+                cfg.receive_proxy_protocol,
+            )?,
             tls: cfg.tls.map(|tls| TlsConfig {
                 sni: tls.sni,
                 dns_provider: ids::dns_provider_id(&tls.dns_provider_id),
@@ -227,9 +252,15 @@ fn spec_from_proto(spec: Option<pb::NodeSpec>) -> Result<NodeSpec, Status> {
         }),
         Spec::Relay(cfg) => NodeSpec::Relay(RelayConfig {
             protocol: match pb::RelayProtocol::try_from(cfg.protocol) {
+                Ok(pb::RelayProtocol::RelayTcpRaw) => RelayProtocol::TcpRaw,
                 Ok(pb::RelayProtocol::RelayTcpTls) => RelayProtocol::TcpTls,
                 Ok(pb::RelayProtocol::RelayQuic) => RelayProtocol::Quic,
-                _ => RelayProtocol::TcpRaw,
+                Ok(pb::RelayProtocol::Unspecified) | Err(_) => {
+                    return Err(Status::invalid_argument(format!(
+                        "protocol: unknown relay protocol {}",
+                        cfg.protocol
+                    )));
+                }
             },
             override_ip_address: (!cfg.override_ip_address.is_empty())
                 .then_some(cfg.override_ip_address),
@@ -243,15 +274,21 @@ fn spec_from_proto(spec: Option<pb::NodeSpec>) -> Result<NodeSpec, Status> {
         }),
         Spec::Exit(cfg) => NodeSpec::Exit(ExitConfig {
             destination: cfg.destination,
-            pass_proxy_protocol: proxy_from_proto(cfg.pass_proxy_protocol),
+            pass_proxy_protocol: proxy_from_proto("pass_proxy_protocol", cfg.pass_proxy_protocol)?,
         }),
         Spec::LoadBalanceDistribute(cfg) => {
             NodeSpec::LoadBalanceDistribute(LoadBalanceDistributeConfig {
                 mode: match pb::LoadBalanceMode::try_from(cfg.mode) {
+                    Ok(pb::LoadBalanceMode::RoundRobin) => LoadBalanceMode::RoundRobin,
                     Ok(pb::LoadBalanceMode::Random) => LoadBalanceMode::Random,
                     Ok(pb::LoadBalanceMode::IpHash) => LoadBalanceMode::IpHash,
                     Ok(pb::LoadBalanceMode::Fallback) => LoadBalanceMode::Fallback,
-                    _ => LoadBalanceMode::RoundRobin,
+                    Ok(pb::LoadBalanceMode::Unspecified) | Err(_) => {
+                        return Err(Status::invalid_argument(format!(
+                            "mode: unknown load balance mode {}",
+                            cfg.mode
+                        )));
+                    }
                 },
             })
         }
@@ -262,11 +299,23 @@ fn spec_from_proto(spec: Option<pb::NodeSpec>) -> Result<NodeSpec, Status> {
         Spec::CanvasExport(cfg) => NodeSpec::CanvasExport(CanvasExportConfig {
             kind: match pb::PortKind::try_from(cfg.kind) {
                 Ok(pb::PortKind::DeriveListen) => PortKind::DeriveListen,
-                _ => PortKind::DeriveDestination,
+                Ok(pb::PortKind::DeriveDestination) => PortKind::DeriveDestination,
+                Ok(pb::PortKind::Unspecified) | Err(_) => {
+                    return Err(Status::invalid_argument(format!(
+                        "kind: unknown port kind {}",
+                        cfg.kind
+                    )));
+                }
             },
             direction: match pb::CanvasExportAs::try_from(cfg.direction) {
+                Ok(pb::CanvasExportAs::InputIntoCanvas) => CanvasExportAs::InputIntoCanvas,
                 Ok(pb::CanvasExportAs::OutputOutOfCanvas) => CanvasExportAs::OutputOutOfCanvas,
-                _ => CanvasExportAs::InputIntoCanvas,
+                Ok(pb::CanvasExportAs::Unspecified) | Err(_) => {
+                    return Err(Status::invalid_argument(format!(
+                        "direction: unknown canvas export direction {}",
+                        cfg.direction
+                    )));
+                }
             },
         }),
     })
@@ -494,8 +543,8 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
                 name: input.name,
                 icon: input.icon,
                 comment: input.comment,
-                position: position_from_proto(input.position),
-                ipv6_resolve: ipv6_from_proto(input.ipv6_resolve),
+                position: position_or_origin(input.position),
+                ipv6_resolve: ipv6_from_proto(input.ipv6_resolve)?,
                 log_level: input.log_level,
             })
             .await?;
@@ -521,15 +570,12 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
                 name: input.name,
                 icon: input.icon,
                 comment: input.comment,
-                ipv6_resolve: ipv6_from_proto(input.ipv6_resolve),
+                ipv6_resolve: ipv6_from_proto(input.ipv6_resolve)?,
                 log_level: input.log_level,
             })
             .await?;
         Ok(Response::new(pb::UpdateServerReply {
-            server: Some(server_to_proto(&ServerWithIp {
-                server,
-                ips: Vec::new(),
-            })),
+            server: Some(server_to_proto(&server)),
         }))
     }
 
@@ -558,7 +604,7 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
             .process(server::MoveServer {
                 actor,
                 server: ids::server_id(&input.server_id),
-                position: position_from_proto(input.position),
+                position: position_or_origin(input.position),
             })
             .await?;
         Ok(Response::new(pb::MoveServerReply {}))
@@ -613,7 +659,7 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
                 name: input.name,
                 comment: input.comment,
                 spec: spec_from_proto(input.spec)?,
-                position: position_from_proto(input.position),
+                position: position_or_origin(input.position),
                 item_count: input.item_count,
             })
             .await?;
@@ -659,7 +705,7 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
             })
             .await?;
         Ok(Response::new(pb::UpdateNodeMetaReply {
-            node: Some(node_row_to_proto(&node, &[])),
+            node: Some(node_to_proto(&node)),
         }))
     }
 

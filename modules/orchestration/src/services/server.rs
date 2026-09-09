@@ -5,7 +5,7 @@ use crate::entities::surreal::node::NodeSpec;
 use crate::entities::surreal::server::{
     CreateServer as CreateServerRow, CreateServerIp, DeleteServerIpRow, DeleteServerRow,
     FindServerById, FindServerIpById, MoveServerPosition, ServerEntity, ServerId,
-    ServerIpRecordEntity, ServerIpRecordId, ServerIpv6Resolve, UpdateServerSettings,
+    ServerIpRecordEntity, ServerIpRecordId, ServerIpv6Resolve, ServerWithIp, UpdateServerSettings,
 };
 use crate::entities::surreal::topology::LoadCanvasTopology;
 use crate::entities::surreal::view::ListServerConfigViewsByCanvas;
@@ -84,7 +84,7 @@ pub struct UpdateServer {
 }
 
 impl Processor<UpdateServer> for ServerService {
-    type Output = ServerEntity;
+    type Output = ServerWithIp;
     type Error = OrchestrationError;
     #[tracing::instrument(name = "Service:UpdateServer", skip_all, err)]
     async fn process(&self, input: UpdateServer) -> Result<Self::Output, Self::Error> {
@@ -94,6 +94,7 @@ impl Processor<UpdateServer> for ServerService {
                 "log_level must not be empty".into(),
             ));
         }
+        let server_key = record_key(&input.server.0);
         let canvas = rollout::canvas_of_server(&self.db, &input.server).await?;
         let topology = self
             .db
@@ -128,7 +129,14 @@ impl Processor<UpdateServer> for ServerService {
             })
             .await?;
         self.notifier.notify(&canvas).await;
-        Ok(server)
+        // The ip records come from the topology this edit was validated against;
+        // the settings write does not touch them.
+        let ips = topology
+            .ips
+            .into_iter()
+            .filter(|ip| record_key(&ip.server.0) == server_key)
+            .collect();
+        Ok(ServerWithIp { server, ips })
     }
 }
 

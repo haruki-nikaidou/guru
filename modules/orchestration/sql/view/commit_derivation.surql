@@ -1,5 +1,10 @@
 BEGIN TRANSACTION;
-LET $fenced = (UPDATE $canvas SET derived_generation = $generation WHERE generation = $generation RETURN AFTER);
+-- `generation` fences against edits made since the pass read the canvas;
+-- `derived_generation < $generation` fences against a second pass that read the
+-- same generation, so only the first one to arrive publishes its revisions.
+LET $fenced = (UPDATE $canvas SET derived_generation = $generation
+    WHERE generation = $generation AND derived_generation < $generation
+    RETURN AFTER);
 IF array::len($fenced) > 0 {
     FOR $u IN $updates {
         IF $u.desired != NONE {

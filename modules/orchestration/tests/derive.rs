@@ -46,22 +46,42 @@ fn relay(protocol: RelayProtocol) -> NodeSpec {
     })
 }
 
+/// True only for an explicit `UPDATE_GOLDEN=1` / `UPDATE_GOLDEN=true`, so a stray
+/// `UPDATE_GOLDEN=0` in the environment cannot turn the suite into a self-comparison.
+fn regenerating() -> bool {
+    matches!(
+        std::env::var("UPDATE_GOLDEN").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// Compares against `tests/golden/<name>.toml` and re-parses the emitted text.
 fn assert_golden(name: &str, toml: &str) {
     let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"))
         .join(format!("{name}.toml"));
-    if std::env::var("UPDATE_GOLDEN").is_ok() {
+    if regenerating() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, toml).unwrap();
+    } else {
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(toml, expected, "derived config for {name} changed");
     }
-    let expected =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    assert_eq!(toml, expected, "derived config for {name} changed");
     guru_worker_config::Config::from_toml_str(toml)
         .unwrap_or_else(|e| panic!("emitted config for {name} does not parse: {e}"));
 }
 
+/// Derives twice from independently built snapshots: `hooks::derive` only skips a
+/// server whose config did not change, so the same topology must render identical
+/// bytes every time.
 fn derived(builder: &Builder, server: &ServerId) -> String {
+    let once = render(builder, server);
+    let twice = render(builder, server);
+    assert_eq!(once, twice, "derivation is not byte-stable");
+    once
+}
+
+fn render(builder: &Builder, server: &ServerId) -> String {
     derive_server_config(&builder.build(), server)
         .unwrap_or_else(|e| panic!("derive failed: {e}"))
         .config

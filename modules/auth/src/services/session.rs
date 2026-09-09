@@ -110,7 +110,9 @@ impl Processor<AuthenticateSession> for SessionService {
             None => return Ok(None),
         };
         let now = Utc::now();
-        if now - session.last_active_at > Duration::seconds(self.config.session_idle_ttl_secs) {
+        if now.signed_duration_since(session.last_active_at)
+            > Duration::seconds(self.config.session_idle_ttl_secs)
+        {
             self.db
                 .process(DeleteSession {
                     session_id: input.session_id,

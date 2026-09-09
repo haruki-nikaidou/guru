@@ -1,30 +1,34 @@
-//! # `app_protobuf`
+//! # `rpguru_sdk`
 //!
-//! Generated gRPC/protobuf types shared across the workspace.
+//! Generated gRPC/protobuf types shared across the workspace. `guru-master`,
+//! `guru-worker`, and the business modules under `modules/` all take their
+//! request/reply types and service traits from here, so there is exactly one
+//! generated copy of the API.
 //!
-//! Protobuf definitions live in the workspace `proto/` directory. Add a
-//! `build.rs` to this crate that compiles them with `tonic-prost-build` (already
-//! declared as a build dependency in `Cargo.toml`), then re-export each
-//! generated package as a module via `tonic::include_proto!`. Both the
-//! `app-server` binary and the business modules under `modules/` depend on this
-//! crate for their request/reply types and service traits.
+//! The workspace `proto/` directory is the single source of truth. This crate's
+//! `build.rs` compiles the `.proto` files it lists with `tonic-prost-build`
+//! (server and client), and re-runs whenever anything under `proto/` changes.
+//! Each generated package is re-exported below with `tonic::include_proto!`.
+//! Never hand-edit or duplicate generated code.
 //!
 //! ## Adding a service
 //!
-//! 1. Put your `.proto` files under `proto/` (for example
-//!    `proto/base/base.proto`) with a package name such as `app.base`.
-//! 2. List them in `build.rs` and compile them with `tonic-prost-build`,
-//!    building both the server and client.
+//! 1. Put the `.proto` file under `proto/<module>/` with a package name such as
+//!    `guru.<module>`.
+//! 2. Add its path to the file list in this crate's `build.rs`.
 //! 3. Re-export the generated package here:
 //!
 //! ```ignore
-//! pub mod base {
-//!     tonic::include_proto!("app.base");
+//! pub mod example {
+//!     tonic::include_proto!("guru.example");
 //! }
 //! ```
 //!
-//! Keep conversions between protobuf types and domain types (`chrono`, `uuid`,
-//! …) in this crate too, so every consumer shares one implementation.
+//! 4. Regenerate the TypeScript counterpart (`typescript/app-protobuf`) from the
+//!    repository root with `bun run generate:proto`.
+//!
+//! Keep conversions between protobuf types and domain types in this crate too,
+//! so every consumer shares one implementation.
 
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]

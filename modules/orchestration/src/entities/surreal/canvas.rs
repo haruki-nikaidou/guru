@@ -43,7 +43,7 @@ pub struct CreateCanvas {
 impl Processor<CreateCanvas> for SurrealProcessor {
     type Output = CanvasEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:CreateCanvas", skip(self), err)]
+    #[tracing::instrument(name = "Query:CreateCanvas", skip_all, err)]
     async fn process(&self, input: CreateCanvas) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -67,7 +67,7 @@ pub struct ListCanvases;
 impl Processor<ListCanvases> for SurrealProcessor {
     type Output = Vec<CanvasEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListCanvases", skip(self), err, fields(result_count))]
+    #[tracing::instrument(name = "Query:ListCanvases", skip_all, err, fields(result_count))]
     async fn process(&self, _input: ListCanvases) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -87,7 +87,7 @@ pub struct FindCanvasById {
 impl Processor<FindCanvasById> for SurrealProcessor {
     type Output = Option<CanvasEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindCanvasById", skip(self), err)]
+    #[tracing::instrument(name = "Query:FindCanvasById", skip_all, err)]
     async fn process(&self, input: FindCanvasById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()

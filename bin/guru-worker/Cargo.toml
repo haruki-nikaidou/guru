@@ -30,11 +30,8 @@ moka = { version = "0.12", features = ["future"] }
 guru_worker_config = { path = "../../lib/guru_worker_config" }
 rpguru_sdk = { path = "../../lib/rpguru_sdk" }
 tonic = { workspace = true, features = ["channel"] }
-tonic-prost = { workspace = true }
-prost = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 orchestration = { path = "../../modules/orchestration" }
