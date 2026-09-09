@@ -1,16 +1,25 @@
 {
-  "name": "wakuwaku-template-workspace",
-  "version": "0.1.0-alpha",
-  "private": true,
-  "type": "module",
-  "workspaces": [
-    "typescript/*"
-  ],
-  "scripts": {
-    "generate:proto": "bun run --filter app-protobuf generate:proto"
-  },
-  "trustedDependencies": [
-    "grpc-tools",
-    "protobufjs"
-  ]
+	"name": "wakuwaku-template-workspace",
+	"version": "0.1.0-alpha",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"typescript/*"
+	],
+	"scripts": {
+		"generate:proto": "bun run --filter app-protobuf generate:proto",
+		"format": "biome format --write .",
+		"format:check": "biome format .",
+		"lint": "biome lint .",
+		"lint:fix": "biome lint --write .",
+		"check": "biome check .",
+		"check:fix": "biome check --write ."
+	},
+	"trustedDependencies": [
+		"grpc-tools",
+		"protobufjs"
+	],
+	"devDependencies": {
+		"@biomejs/biome": "2.5.12"
+	}
 }
