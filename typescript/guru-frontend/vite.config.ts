@@ -1,5 +1,5 @@
 import { paraglideVitePlugin } from '@inlang/paraglide-js';
-import adapter from '@sveltejs/adapter-auto';
+import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { mdsvex } from 'mdsvex';
@@ -16,9 +16,7 @@ export default defineConfig({
 				experimental: { async: true }
 			},
 
-			// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
-			// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
-			// See https://svelte.dev/docs/kit/adapters for more information about adapters.
+			// Node adapter: the dashboard's remote functions run a gRPC client server-side.
 			adapter: adapter(),
 			preprocess: [mdsvex({ extensions: ['.svx', '.md'] })],
 			extensions: ['.svelte', '.svx', '.md'],
@@ -28,7 +26,9 @@ export default defineConfig({
 		paraglideVitePlugin({
 			project: './project.inlang',
 			outdir: './src/lib/paraglide',
-			emitTsDeclarations: true
+			emitTsDeclarations: true,
+			strategy: ['cookie', 'preferredLanguage', 'baseLocale'],
+			cookieName: 'guru_locale'
 		})
 	]
 });

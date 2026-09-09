@@ -1,0 +1,73 @@
+<script lang="ts">
+import { toast } from 'svelte-sonner';
+import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js';
+import { buttonVariants } from '#lib/components/ui/button/index.js';
+import * as Field from '#lib/components/ui/field/index.js';
+import { Input } from '#lib/components/ui/input/index.js';
+import { Spinner } from '#lib/components/ui/spinner/index.js';
+import type { CanvasSummary } from '#lib/dto/canvas.js';
+import { errorMessage } from '#lib/i18n/codes.js';
+import { m } from '#lib/paraglide/messages.js';
+import { deleteCanvas } from './canvases.remote.js';
+
+let { canvas, open = $bindable(false) }: { canvas: CanvasSummary; open?: boolean } = $props();
+
+let confirmName = $state('');
+let pending = $state(false);
+
+$effect(() => {
+	if (!open) confirmName = '';
+});
+
+async function confirm() {
+	pending = true;
+	try {
+		await deleteCanvas({ canvasId: canvas.id });
+		open = false;
+		toast.success(m.canvas_deleted());
+	} catch (err) {
+		const body = (err as { body?: App.Error }).body;
+		toast.error(errorMessage(body?.code, body?.message ?? ''));
+	} finally {
+		pending = false;
+	}
+}
+</script>
+
+<AlertDialog.Root bind:open>
+	<AlertDialog.Content>
+		<AlertDialog.Header>
+			<AlertDialog.Title>{m.canvas_delete_title()}</AlertDialog.Title>
+			<AlertDialog.Description>
+				{m.canvas_delete_warning({ name: canvas.name })}
+			</AlertDialog.Description>
+		</AlertDialog.Header>
+
+		{#if canvas.stats}
+			<p class="text-sm text-muted-foreground">
+				{m.canvas_servers_count({ count: canvas.stats.servers })} ·
+				{m.canvas_nodes_count({ count: canvas.stats.nodes })} ·
+				{m.canvas_edges_count({ count: canvas.stats.edges })}
+			</p>
+		{/if}
+
+		<Field.Field>
+			<Field.FieldDescription>
+				{m.canvas_delete_confirm_hint({ name: canvas.name })}
+			</Field.FieldDescription>
+			<Input bind:value={confirmName} autocomplete="off" />
+		</Field.Field>
+
+		<AlertDialog.Footer>
+			<AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+			<AlertDialog.Action
+				class={buttonVariants({ variant: 'destructive' })}
+				disabled={confirmName.trim() !== canvas.name || pending}
+				onclick={confirm}
+			>
+				{#if pending}<Spinner data-icon="inline-start" />{/if}
+				{m.common_delete()}
+			</AlertDialog.Action>
+		</AlertDialog.Footer>
+	</AlertDialog.Content>
+</AlertDialog.Root>
