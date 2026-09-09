@@ -13,8 +13,8 @@ use orchestration::entities::surreal::connection::{
     ConnectPorts, DeleteEdgeRow, EdgeConnectionId, FindEdgeById,
 };
 use orchestration::entities::surreal::node::{
-    DeleteNodeRow, ExitConfig, FindNodeById, FindNodeWithPorts, NodeSpec, UpdateNodeMetaRow,
-    UpdateNodeSpecRow,
+    DeleteNodeRow, ExitConfig, FindNodeById, FindNodeWithPorts, NodeSpec, PodConfig,
+    UpdateNodeMetaRow, UpdateNodeSpecRow,
 };
 use orchestration::entities::surreal::port::PortId;
 use orchestration::entities::surreal::server::{
@@ -671,6 +671,119 @@ async fn server_ip_records_are_scoped_to_their_canvas() -> TestResult {
     assert!(
         resp.take::<Vec<ServerIpRecordId>>(0)?.is_empty(),
         "and leaves no orphaned ip rows in the table"
+    );
+    Ok(())
+}
+
+/// The two deletes that can strand a pod. Both are called here directly, exactly
+/// as a racing caller would reach them: the service-layer pre-checks run in an
+/// earlier transaction, so the invariant has to hold inside the delete itself.
+#[tokio::test]
+async fn deleting_an_ip_a_pod_listens_on_is_refused() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    let ip = server_ip(&sp, &s, "203.0.113.10").await?;
+    let pod = node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
+
+    sp.process(DeleteServerIpRow {
+        id: ip.id.clone(),
+        canvas: c.id.clone(),
+    })
+    .await
+    .expect_err("the ip record is still listened on");
+    assert!(
+        sp.process(FindServerIpById { id: ip.id.clone() })
+            .await?
+            .is_some(),
+        "the refused delete left the ip record in place"
+    );
+
+    // The same holds for the server cascade, which removes those ip rows.
+    sp.process(DeleteServerRow {
+        id: s.id.clone(),
+        canvas: c.id.clone(),
+    })
+    .await
+    .expect_err("the server still has a live pod");
+    assert!(
+        sp.process(FindServerById { id: s.id.clone() })
+            .await?
+            .is_some(),
+        "the refused cascade left the server in place"
+    );
+
+    // Once the pod is gone, both succeed and nothing is left dangling.
+    sp.process(DeleteNodeRow {
+        id: pod.node.id.clone(),
+        canvas: c.id.clone(),
+    })
+    .await?;
+    sp.process(DeleteServerRow {
+        id: s.id.clone(),
+        canvas: c.id.clone(),
+    })
+    .await?;
+    assert!(
+        sp.process(FindServerIpById { id: ip.id }).await?.is_none(),
+        "the cascade removed the ip record with its server"
+    );
+    Ok(())
+}
+
+/// The pod -> server link is what lets derivation attribute a per-pod failure to
+/// a server, so the schema refuses a link that is dangling or points into another
+/// canvas. Written through the real `CreateNodeRow` path on purpose: the guard
+/// sits on `spec.config.ip`, and only the actual `NodeSpec` encoding proves it
+/// guards where the rows really land.
+#[tokio::test]
+async fn a_pod_cannot_reference_a_missing_ip_record() -> TestResult {
+    let sp = setup().await?;
+    let c = canvas(&sp, "prod").await?;
+    let other = canvas(&sp, "staging").await?;
+    let s = server(&sp, &c, "tokyo").await?;
+    let ip = server_ip(&sp, &s, "203.0.113.10").await?;
+
+    // A sound reference is accepted...
+    node(&sp, &c, "pod", pod_spec(&ip, 443), pod_ports()).await?;
+
+    // ...an ip record in another canvas is not: derivation loads one canvas at a
+    // time, so a foreign link reads exactly like a missing one.
+    node(&sp, &other, "foreign-pod", pod_spec(&ip, 443), pod_ports())
+        .await
+        .expect_err("a pod may not reach into another canvas for its ip");
+
+    // ...and one pointing at an id no row carries is refused. The assertion runs
+    // inside `CreateNodeRow`'s transaction, so what surfaces is the cancellation;
+    // what matters is that nothing was written.
+    let ghost = orchestration::utils::ids::server_ip_id("ghost");
+    let spec = NodeSpec::Pod(PodConfig {
+        ip: ghost,
+        port: 443,
+    });
+    node(&sp, &c, "ghost-pod", spec, pod_ports())
+        .await
+        .expect_err("a dangling ip link must not be storable");
+    let topology = sp
+        .process(LoadCanvasTopology {
+            canvas: c.id.clone(),
+        })
+        .await?;
+    let names: Vec<&str> = topology
+        .nodes
+        .iter()
+        .map(|n| n.node.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["pod"],
+        "the rejected pod left no row behind, and the sound one is untouched"
+    );
+    assert!(
+        sp.process(FindServerIpById { id: ip.id.clone() })
+            .await?
+            .is_some(),
+        "the sound ip record is untouched"
     );
     Ok(())
 }

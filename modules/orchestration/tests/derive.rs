@@ -14,7 +14,7 @@ use orchestration::entities::surreal::node::{
     TlsConfig,
 };
 use orchestration::entities::surreal::server::{ServerId, ServerIpRecordId};
-use orchestration::services::derive::{DeriveError, derive_server_config};
+use orchestration::services::derive::derive_server_config;
 use orchestration::utils::ids;
 
 fn exit(dest: &str) -> NodeSpec {
@@ -258,10 +258,21 @@ fn tls_entries_are_not_supported_yet() {
     b.connect("pod-listen", "entry-listen");
     b.connect("exit-destination", "pod-destination");
 
-    let err = derive_server_config(&b.build(), &s).expect_err("tls is a later stage");
+    let result = derive_server_config(&b.build(), &s).expect("the server still derives");
     assert!(
-        matches!(err, DeriveError::TlsNotYetSupported { .. }),
-        "{err:?}"
+        result.config.forwardings.is_empty(),
+        "the only pod is invalid, so nothing is served: {:?}",
+        result.config.forwardings
+    );
+    let [invalid] = result.invalid.as_slice() else {
+        panic!("expected exactly one invalid pod, got {:?}", result.invalid);
+    };
+    assert_eq!(invalid.pod, "pod");
+    assert_eq!(invalid.listen, "203.0.113.10:443");
+    assert!(
+        invalid.error.contains("TLS"),
+        "the stored reason must name the cause: {}",
+        invalid.error
     );
 }
 
@@ -280,10 +291,16 @@ fn quic_relays_are_not_supported_yet() {
     b.connect("pod2-listen", "entry-listen");
     b.connect("exit-destination", "pod-destination");
 
-    let err = derive_server_config(&b.build(), &s).expect_err("quic relays need the internal CA");
+    // Both pods sit behind the unsupported relay: the quic hop is on pod's
+    // destination side and pod2 is the relay's listening side.
+    let result = derive_server_config(&b.build(), &s).expect("the server still derives");
+    let mut invalid: Vec<&str> = result.invalid.iter().map(|p| p.pod.as_str()).collect();
+    invalid.sort_unstable();
+    assert_eq!(invalid, ["pod", "pod2"]);
     assert!(
-        matches!(err, DeriveError::RelayProtocolNotYetSupported { .. }),
-        "{err:?}"
+        result.invalid.iter().all(|p| p.error.contains("quic")),
+        "{:?}",
+        result.invalid
     );
 }
 
@@ -296,4 +313,82 @@ fn a_pod_with_an_unconnected_port_is_skipped() {
     let result = derive_server_config(&b.build(), &s).unwrap();
     assert!(result.config.forwardings.is_empty());
     assert!(result.forwardings.is_empty());
+}
+
+/// The point of per-pod isolation: a half-drawn relay must not cost the server
+/// its other pods.
+#[test]
+fn a_broken_pod_leaves_its_neighbour_deriving() {
+    let mut b = Builder::new("prod");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+
+    // Healthy: entry -> good -> exit.
+    b.node("good", pod(&ip, 443), pod_ports());
+    b.node("in", entry(None), entry_ports());
+    b.node("out", exit("10.0.0.5:8080"), exit_ports());
+    b.connect("good-listen", "in-listen");
+    b.connect("out-destination", "good-destination");
+
+    // Broken: dials a relay whose own listen side nothing feeds yet.
+    b.node("half", pod(&ip, 8443), pod_ports());
+    b.node("in2", entry(None), entry_ports());
+    b.node("hop", relay(RelayProtocol::TcpRaw), relay_ports());
+    b.connect("half-listen", "in2-listen");
+    b.connect("hop-destination", "half-destination");
+
+    let result = derive_server_config(&b.build(), &s).expect("the healthy pod still derives");
+    let tags: Vec<&str> = result
+        .config
+        .forwardings
+        .iter()
+        .map(|f| f.tag.as_str())
+        .collect();
+    assert_eq!(tags, ["good"], "the healthy pod is served on its own");
+    assert_eq!(result.forwardings.len(), 1);
+    let [invalid] = result.invalid.as_slice() else {
+        panic!("expected exactly one invalid pod, got {:?}", result.invalid);
+    };
+    assert_eq!(invalid.pod, "half");
+    assert_eq!(invalid.listen, "203.0.113.10:8443");
+}
+
+/// A load-balance group with no connected members used to reach the worker as an
+/// empty group and fail the whole server at validation.
+#[test]
+fn an_empty_load_balance_group_invalidates_only_its_pod() {
+    let mut b = Builder::new("prod");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+
+    b.node("good", pod(&ip, 443), pod_ports());
+    b.node("in", entry(None), entry_ports());
+    b.node("out", exit("10.0.0.5:8080"), exit_ports());
+    b.connect("good-listen", "in-listen");
+    b.connect("out-destination", "good-destination");
+
+    b.node("lb-pod", pod(&ip, 8443), pod_ports());
+    b.node("in2", entry(None), entry_ports());
+    b.node(
+        "lb",
+        NodeSpec::LoadBalanceDistribute(LoadBalanceDistributeConfig {
+            mode: LoadBalanceMode::RoundRobin,
+        }),
+        distribute_ports(2),
+    );
+    b.connect("lb-pod-listen", "in2-listen");
+    b.connect("lb-destination", "lb-pod-destination");
+
+    let result = derive_server_config(&b.build(), &s).expect("the healthy pod still derives");
+    let tags: Vec<&str> = result
+        .config
+        .forwardings
+        .iter()
+        .map(|f| f.tag.as_str())
+        .collect();
+    assert_eq!(tags, ["good"]);
+    let [invalid] = result.invalid.as_slice() else {
+        panic!("expected exactly one invalid pod, got {:?}", result.invalid);
+    };
+    assert_eq!(invalid.pod, "lb-pod");
 }

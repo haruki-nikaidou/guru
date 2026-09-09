@@ -7,6 +7,7 @@
 //! have since been edited in place.
 
 use crate::entities::surreal::canvas::CanvasId;
+use crate::entities::surreal::node::NodeId;
 use crate::entities::surreal::server::ServerId;
 use crate::entities::surreal::topology::CanvasTopology;
 use chrono::{DateTime, Utc};
@@ -65,8 +66,29 @@ impl ListenerCap {
 /// One `[[forwarding]]` entry's place in the dependency graph.
 #[derive(Debug, Clone, SurrealValue)]
 pub struct ForwardingDeps {
+    /// The pod node this entry was derived from.
+    ///
+    /// Identity, not diagnostics: it is how convergence finds the previous shape
+    /// of a forwarding whose pod stopped deriving. A socket cannot serve that
+    /// purpose, because the edit that broke the pod may also have moved it.
+    pub pod: NodeId,
     pub serves: ListenerCap,
     pub points_at: Vec<ListenerCap>,
+}
+
+/// A pod whose own derivation failed.
+///
+/// The rest of the server still derives and is published; this is how an operator
+/// learns which pod is broken and why. A pod listed here keeps serving whatever
+/// its listener last was, so a bad edit cannot drop live traffic.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct InvalidPod {
+    pub node: NodeId,
+    /// The pod's name, i.e. the `[[forwarding]]` tag it would have carried.
+    pub pod: String,
+    /// The socket the pod would serve, as `ip:port`. Diagnostic only.
+    pub listen: String,
+    pub error: String,
 }
 
 /// An immutable rendering of one server's config.
@@ -93,6 +115,9 @@ pub struct ServerConfigViewEntity {
     pub failed_revision: Option<i64>,
     pub apply_error: Option<String>,
     pub derive_error: Option<String>,
+    /// Pods that failed to derive while the rest of this server's config was
+    /// published. Empty when `derive_error` is set: that is a whole-server failure.
+    pub invalid_pods: Vec<InvalidPod>,
     /// Servers whose `applied` config does not yet serve a listener this server's
     /// ideal config points at.
     pub waiting_for: Vec<ServerId>,
@@ -320,6 +345,7 @@ pub struct ViewUpdate {
     pub server: ServerId,
     pub desired: Option<ConfigSnapshot>,
     pub derive_error: Option<String>,
+    pub invalid_pods: Vec<InvalidPod>,
     pub waiting_for: Vec<ServerId>,
     /// A new desired revision clears the previous failure, so a fixed config is
     /// offered to the worker again.

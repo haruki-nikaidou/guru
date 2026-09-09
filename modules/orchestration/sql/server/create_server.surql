@@ -7,7 +7,8 @@ LET $server = (CREATE ONLY orchestration_server CONTENT {
 });
 CREATE orchestration_server_config_view CONTENT {
     server: $server.id, desired: NONE, in_flight: NONE, applied: NONE,
-    failed_revision: NONE, apply_error: NONE, derive_error: NONE, waiting_for: []
+    failed_revision: NONE, apply_error: NONE, derive_error: NONE,
+    invalid_pods: [], waiting_for: []
 };
 UPDATE $canvas SET generation += 1;
 RETURN $server;

@@ -828,6 +828,16 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
                 .iter()
                 .map(|id| ids::record_key(&id.0))
                 .collect(),
+            invalid_pods: status
+                .invalid_pods
+                .into_iter()
+                .map(|pod| pb::InvalidPod {
+                    node_id: ids::record_key(&pod.node.0),
+                    pod_name: pod.pod,
+                    listen: pod.listen,
+                    error: pod.error,
+                })
+                .collect(),
             derivation_pending: status.derivation_pending,
             last_seen_at: status
                 .last_seen_at

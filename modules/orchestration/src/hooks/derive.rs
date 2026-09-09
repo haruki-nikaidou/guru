@@ -128,9 +128,12 @@ impl Processor<DeriveCanvas> for CanvasDeriver {
     }
 }
 
-/// One server's slot in a derivation pass. Every failure mode ends up as a stored
-/// `derive_error` instead of aborting the pass: one unsupported node must not stop
-/// the rest of the canvas from rolling out.
+/// One server's slot in a derivation pass.
+///
+/// A pod that cannot be derived is reported in `invalid_pods` and costs only its
+/// own forwarding; `derive_error` is reserved for a failure of the whole server,
+/// which now means only a cross-pod one (two pods claiming a socket) or a broken
+/// stored snapshot.
 fn derive_one(
     server: ServerId,
     view: &ServerConfigViewEntity,
@@ -142,6 +145,7 @@ fn derive_one(
         server: server.clone(),
         desired: None,
         derive_error: Some(error),
+        invalid_pods: Vec::new(),
         waiting_for: Vec::new(),
         clear_failure: false,
     };
@@ -164,11 +168,13 @@ fn derive_one(
 
     if view.desired.as_ref().map(|s| s.toml.as_str()) == Some(toml.as_str()) {
         // Byte-identical: no new revision, so the worker is never restarted for an
-        // edit that does not concern it.
+        // edit that does not concern it. The pod report still has to land: a pod
+        // may have broken (or been fixed) without changing the served config.
         return ViewUpdate {
             server,
             desired: None,
             derive_error: None,
+            invalid_pods: converged.invalid,
             waiting_for: converged.waiting_for,
             clear_failure: false,
         };
@@ -188,6 +194,7 @@ fn derive_one(
             forwardings: converged.forwardings,
         }),
         derive_error: None,
+        invalid_pods: converged.invalid,
         waiting_for: converged.waiting_for,
         clear_failure: true,
     }
