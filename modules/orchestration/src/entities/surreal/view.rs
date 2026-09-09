@@ -106,7 +106,7 @@ pub struct FindServerConfigView {
 impl Processor<FindServerConfigView> for SurrealProcessor {
     type Output = Option<ServerConfigViewEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindServerConfigView", skip(self), err)]
+    #[tracing::instrument(name = "Query:FindServerConfigView", skip_all, err)]
     async fn process(&self, input: FindServerConfigView) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -125,7 +125,7 @@ pub struct ListServerConfigViewsByCanvas {
 impl Processor<ListServerConfigViewsByCanvas> for SurrealProcessor {
     type Output = Vec<ServerConfigViewEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListServerConfigViewsByCanvas", skip(self), err)]
+    #[tracing::instrument(name = "Query:ListServerConfigViewsByCanvas", skip_all, err)]
     async fn process(
         &self,
         input: ListServerConfigViewsByCanvas,
@@ -155,7 +155,7 @@ impl Processor<TakeInFlight> for SurrealProcessor {
     /// The snapshot to send, or `None` when there is nothing to hand out.
     type Output = Option<ConfigSnapshot>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:TakeInFlight", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:TakeInFlight", skip_all, err)]
     async fn process(&self, input: TakeInFlight) -> Result<Self::Output, Self::Error> {
         // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
@@ -182,7 +182,7 @@ impl Processor<AckServerConfig> for SurrealProcessor {
     /// `false` when the acknowledged revision is not the one in flight.
     type Output = bool;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:AckServerConfig", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:AckServerConfig", skip_all, err)]
     async fn process(&self, input: AckServerConfig) -> Result<Self::Output, Self::Error> {
         // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
@@ -207,7 +207,7 @@ pub struct ForgetServerAppliedRow {
 impl Processor<ForgetServerAppliedRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:ForgetServerAppliedRow", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:ForgetServerAppliedRow", skip_all, err)]
     async fn process(&self, input: ForgetServerAppliedRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(include_str!(
@@ -229,6 +229,7 @@ pub struct ServerWatchState {
     pub watch_epoch: i64,
     pub desired_revision: Option<i64>,
     pub in_flight_revision: Option<i64>,
+    pub applied_revision: Option<i64>,
     pub failed_revision: Option<i64>,
 }
 
@@ -246,7 +247,8 @@ impl Processor<ListServerWatchState> for SurrealProcessor {
             .query(
                 "SELECT server AS id, server.refresh_key_generation AS refresh_key_generation,
                      server.watch_epoch AS watch_epoch, desired.revision AS desired_revision,
-                     in_flight.revision AS in_flight_revision, failed_revision
+                     in_flight.revision AS in_flight_revision,
+                     applied.revision AS applied_revision, failed_revision
                  FROM orchestration_server_config_view WHERE server IN $servers",
             )
             .bind(("servers", input.servers))

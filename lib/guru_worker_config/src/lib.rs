@@ -42,6 +42,7 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Forwarding {
     pub tag: String,
     pub listen: SocketAddr,
@@ -98,6 +99,7 @@ impl Remote {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TcpProxyProtocol {
     #[serde(rename = "v1")]
     V1,
@@ -106,13 +108,14 @@ pub enum TcpProxyProtocol {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsHostConfig {
     pub key: PathBuf,
     pub full_chain: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ListenAs {
     Raw,
     Tls(TlsHostConfig),
@@ -120,7 +123,7 @@ pub enum ListenAs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "relay_type")]
+#[serde(tag = "relay_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RelayHost {
     #[serde(rename = "tcp")]
     Tcp,
@@ -131,7 +134,7 @@ pub enum RelayHost {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ForwardingTo {
     Exit {
         destination: Remote,
@@ -148,6 +151,7 @@ pub enum ForwardingTo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RelayProtocol {
     #[serde(rename = "tcp")]
     Tcp,
@@ -158,13 +162,14 @@ pub enum RelayProtocol {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoadBalanceGroup {
     pub strategy: LoadBalanceStrategy,
     pub members: SmallVec<[ForwardingTo; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LoadBalanceStrategy {
     RoundRobin,
     Random,
@@ -191,51 +196,50 @@ impl LoadBalanceGroup {
 }
 
 impl Forwarding {
-    fn warn_suspicious_ip_hash(&self) {
-        let sus = if self.receive_proxy_protocol.is_none() {
-            match &self.to {
-                ForwardingTo::Exit { .. } => false,
-                ForwardingTo::Relay { .. } => false,
-                ForwardingTo::LoadBalance(c) => c.ip_hash_somewhere(),
-            }
-        } else {
-            return;
+    fn suspicious_ip_hash(&self) -> Option<String> {
+        if self.receive_proxy_protocol.is_some() {
+            return None;
+        }
+        let sus = match &self.to {
+            ForwardingTo::Exit { .. } => false,
+            ForwardingTo::Relay { .. } => false,
+            ForwardingTo::LoadBalance(c) => c.ip_hash_somewhere(),
         };
-        if sus {
-            tracing::warn!(
+        sus.then(|| {
+            format!(
                 "forward role {} doesn't enable proxy protocol but used ip_hash for load balancing",
                 self.tag
-            );
-        }
+            )
+        })
     }
-    fn warn_unnecessary_load_balance(&self) {
-        if let ForwardingTo::LoadBalance(c) = &self.to
-            && c.unnecessary_load_balance()
-        {
-            tracing::warn!(
+    fn unnecessary_load_balance(&self) -> Option<String> {
+        match &self.to {
+            ForwardingTo::LoadBalance(c) if c.unnecessary_load_balance() => Some(format!(
                 "forward role {} has only one member in load balance group, unnecessary load balance",
                 self.tag
-            );
+            )),
+            _ => None,
         }
     }
-    fn error_empty_load_balance(&self) -> bool {
+    fn empty_load_balance(&self) -> Option<String> {
         match &self.to {
-            ForwardingTo::LoadBalance(c) if c.empty_members() => {
-                tracing::error!(
-                    "forward role {} has no member in load balance group",
-                    self.tag
-                );
-                true
-            }
-            _ => false,
+            ForwardingTo::LoadBalance(c) if c.empty_members() => Some(format!(
+                "forward role {} has no member in load balance group",
+                self.tag
+            )),
+            _ => None,
         }
     }
-    pub fn lint(&self) {
-        if self.error_empty_load_balance() {
-            return;
+    /// Warnings worth showing an operator. Never fatal: [`Config::validate`] owns
+    /// the hard errors, and callers decide whether and how to report these.
+    pub fn lint(&self) -> Vec<String> {
+        if let Some(empty) = self.empty_load_balance() {
+            return vec![empty];
         }
-        self.warn_suspicious_ip_hash();
-        self.warn_unnecessary_load_balance();
+        self.suspicious_ip_hash()
+            .into_iter()
+            .chain(self.unnecessary_load_balance())
+            .collect()
     }
 }
 
@@ -263,7 +267,7 @@ impl Forwarding {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Ipv6Resolve {
     /// Only accept IPv6 results; if none exist, treat as a resolution failure.
     Required,
@@ -277,6 +281,7 @@ pub enum Ipv6Resolve {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub ipv6_resolve: Ipv6Resolve,
@@ -287,7 +292,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LogConfig {
     pub level: String,
 }
@@ -301,14 +306,17 @@ impl Default for LogConfig {
 }
 
 impl Config {
-    /// Parses TOML text, then validates and lints it.
+    /// Parses TOML text and validates it. Linting is separate: call [`Config::lint`]
+    /// when the caller is in a position to report warnings to an operator.
     pub fn from_toml_str(text: &str) -> Result<Config, ConfigError> {
         let cfg: Config = toml::from_str(text)?;
         cfg.validate()?;
-        for f in &cfg.forwardings {
-            f.lint();
-        }
         Ok(cfg)
+    }
+
+    /// Non-fatal warnings about this config, in forwarding order.
+    pub fn lint(&self) -> Vec<String> {
+        self.forwardings.iter().flat_map(Forwarding::lint).collect()
     }
 
     pub fn load(path: &Path) -> Result<Config, ConfigError> {

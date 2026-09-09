@@ -87,11 +87,29 @@ struct Cli {
     namespace: String,
     #[arg(long, env = "SURREALDB_NAME")]
     database: String,
-    #[arg(long, env = "AMQP_URI")]
+    #[arg(
+        long,
+        env = "AMQP_URI",
+        help = "Broker URI, e.g. amqp://guru:guru@127.0.0.1:5672/%2f. Required in \
+                every mode that talks to the broker: dashboard_grpc, workers_grpc \
+                and consumer."
+    )]
     amqp_uri: Option<String>,
-    #[arg(long, env = "GURU_SWEEP_INTERVAL_SECS", default_value = "30")]
+    // A zero interval panics `tokio::time::interval`, so the range is enforced
+    // here: clap applies the parser to the environment variable as well.
+    #[arg(
+        long,
+        env = "GURU_SWEEP_INTERVAL_SECS",
+        default_value = "30",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     sweep_interval_secs: u64,
-    #[arg(long, env = "GURU_WATCH_POLL_MS", default_value = "1000")]
+    #[arg(
+        long,
+        env = "GURU_WATCH_POLL_MS",
+        default_value = "1000",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     watch_poll_ms: u64,
     #[arg(long, env = "GURU_LOG_LEVEL", default_value = "info")]
     log_level: String,
@@ -202,13 +220,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .serve_with_shutdown(cli.workers_addr, shutdown())
                 .await?;
             token.cancel();
-            let _ = poller.await;
+            // A panicking poller must not be absorbed: without it no worker ever
+            // learns of a new revision, so the process exits non-zero.
+            if let Err(error) = poller.await {
+                tracing::error!(%error, "the config-view poller task failed");
+                return Err(error.into());
+            }
         }
         WorkerMode::Consumer => {
-            let uri = cli
-                .amqp_uri
-                .as_deref()
-                .ok_or("consumer mode needs AMQP_URI")?;
+            let uri = amqp_uri(cli.amqp_uri.as_deref())?;
             let (connection, pool) = amqp_pool(uri).await?;
             let channel = CanvasDeriver::ensure_queue(&pool).await?;
             channel
@@ -226,7 +246,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .map_err(|e| format!("binding the consumer failed: {e}"))?;
             tracing::info!(queue = CanvasDeriver::QUEUE, "consuming canvas edits");
-            shutdown().await;
+            // `amqprs` does not reconnect, and a dead consumer in a live process
+            // is silent: broker loss ends this mode so the supervisor restarts it.
+            let lost = tokio::select! {
+                () = shutdown() => false,
+                _ = connection.listen_network_io_failure() => true,
+            };
+            if lost {
+                return Err("the AMQP connection was lost: restart once the broker \
+                            at AMQP_URI is reachable again"
+                    .into());
+            }
             drop(channel);
             connection
                 .close()
@@ -246,7 +276,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             shutdown().await;
             token.cancel();
-            let _ = sweeper.await;
+            if let Err(error) = sweeper.await {
+                tracing::error!(%error, "the derivation sweeper task failed");
+                return Err(error.into());
+            }
         }
     }
     Ok(())
@@ -273,17 +306,23 @@ async fn amqp_pool(uri: &str) -> Result<(Connection, AmqpPool), Box<dyn std::err
     Ok((connection, pool))
 }
 
-/// The dirty-canvas notifier for a serving mode. Without a broker the cron sweep
-/// is the only derivation trigger, which is correct but slower.
+/// The dirty-canvas notifier for a serving mode. The broker is mandatory: a
+/// serving master that cannot publish dirty-canvas events would accept edits
+/// nothing derives.
 async fn notifier(
     uri: Option<&str>,
-) -> Result<(Option<Connection>, DirtyNotifier), Box<dyn std::error::Error>> {
-    let Some(uri) = uri else {
-        tracing::warn!("AMQP_URI unset: relying on the cron sweep for derivation");
-        return Ok((None, DirtyNotifier::default()));
-    };
-    let (connection, pool) = amqp_pool(uri).await?;
-    Ok((Some(connection), DirtyNotifier { amqp: Some(pool) }))
+) -> Result<(Connection, DirtyNotifier), Box<dyn std::error::Error>> {
+    let (connection, pool) = amqp_pool(amqp_uri(uri)?).await?;
+    Ok((connection, DirtyNotifier { amqp: Some(pool) }))
+}
+
+/// The configured broker URI, or an actionable error: AMQP is not optional.
+fn amqp_uri(uri: Option<&str>) -> Result<&str, Box<dyn std::error::Error>> {
+    uri.ok_or_else(|| {
+        "AMQP is required: set AMQP_URI (or pass --amqp-uri), for example \
+         amqp://guru:guru@127.0.0.1:5672/%2f"
+            .into()
+    })
 }
 
 /// Completes on SIGTERM or SIGINT.

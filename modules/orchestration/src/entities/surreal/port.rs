@@ -38,7 +38,7 @@ pub struct FindPortById {
 impl Processor<FindPortById> for SurrealProcessor {
     type Output = Option<PortEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindPortById", skip(self), err)]
+    #[tracing::instrument(name = "Query:FindPortById", skip_all, err)]
     async fn process(&self, input: FindPortById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()

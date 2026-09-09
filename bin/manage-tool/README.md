@@ -3,14 +3,26 @@
 Command-line administration tool for operating the application outside the
 request path.
 
-## Typical commands
+## Commands
 
-- **Migrations** — run and validate the SQL migrations in
-  [`migrations/`](../../migrations).
-- **Configuration** — seed default config values into the database and refresh
-  the Redis cache; validate config JSON.
-- **Admin accounts** — create, list, and manage administrator accounts.
-- **Maintenance** — one-off data fixes and operational chores.
+- **`create-admin --email <email> --password <password>`** — bootstrap the first
+  administrator account. It goes straight through the `auth` entity layer,
+  because no acting admin exists yet to authorise the call.
+- **`orchestration export-config --server <server-key>`** — derive one server's
+  ideal `guru-worker` TOML from the live canvas and print it to stdout, without
+  touching the rollout state.
+
+Connection settings are read from flags, each with an environment fallback:
+`--address`/`SURREALDB_HOST`, `--username`/`SURREALDB_USER`,
+`--password`/`SURREALDB_PASSWORD`, `--namespace`/`SURREALDB_NAMESPACE`, and
+`--database`/`SURREALDB_NAME`.
+
+## Schema is not managed here
+
+The SurrealDB schema lives in [`database/schema/*.surql`](../../database/schema)
+and is managed with **surrealkit**: `surrealkit sync` against a development
+database, `surrealkit rollout` for shared ones. This tool only reads and writes
+rows through the module entities.
 
 ## Why a separate binary
 
@@ -23,7 +35,7 @@ exact types and queries the server uses.
 ## Conventions
 
 - Build subcommands with a CLI parser (e.g. `clap`).
-- Read connection settings (`DATABASE_URL`, `REDIS_URL`) from flags or the
-  environment.
-- Reuse module `entities`/`services` rather than issuing ad-hoc SQL, so the tool
-  and the server never drift apart.
+- Take connection settings from flags with an environment fallback (`clap`'s
+  `env` attribute), not from a config file.
+- Reuse module `entities`/`services` rather than issuing ad-hoc SurrealQL, so
+  the tool and the server never drift apart.

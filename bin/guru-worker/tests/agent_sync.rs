@@ -39,6 +39,7 @@ use rpguru_sdk::orchestration_agent::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +47,18 @@ use tonic::Status;
 use wakuwaku::surreal::SurrealProcessor;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// Nothing in this file may wait forever: a regression anywhere in the master —
+/// the deriver, the poller or the session bookkeeping — must fail the test instead
+/// of hanging CI. Every receive and every RPC goes through here.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+async fn within<F: Future>(what: &str, fut: F) -> F::Output {
+    match tokio::time::timeout(PATIENCE, fut).await {
+        Ok(value) => value,
+        Err(_) => panic!("timed out after {PATIENCE:?} waiting for {what}"),
+    }
+}
 
 fn operator() -> Identity {
     Identity {
@@ -353,6 +366,7 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
             api_key: api_key.clone(),
             server_id: ids::record_key(&canvas.server.0),
             state_dir: state_dir.clone(),
+            applied_revision: Arc::new(AtomicI64::new(0)),
         },
         sup.clone(),
         agent_shutdown.clone(),
@@ -365,9 +379,12 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
                 == view.desired.as_ref().map(|s| s.revision)
     })
     .await;
-    tokio::net::TcpStream::connect(canvas.listen)
-        .await
-        .expect("the derived listener is bound");
+    within(
+        "the derived listener to accept",
+        tokio::net::TcpStream::connect(canvas.listen),
+    )
+    .await
+    .expect("the derived listener is bound");
     let good = state::load(&state_dir).expect("last-known-good was persisted");
     let first_revision = good.revision;
     assert!(good.toml.contains(&canvas.listen.to_string()));
@@ -421,9 +438,12 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
         "the apply error names the failing forwarding: {:?}",
         view.apply_error
     );
-    tokio::net::TcpStream::connect(canvas.listen)
-        .await
-        .expect("the previous listener still serves");
+    within(
+        "the previous listener to accept",
+        tokio::net::TcpStream::connect(canvas.listen),
+    )
+    .await
+    .expect("the previous listener still serves");
     assert_eq!(
         state::load(&state_dir).unwrap().revision,
         first_revision,
@@ -431,7 +451,7 @@ async fn worker_applies_config_and_survives_a_bad_revision() -> TestResult {
     );
 
     agent_shutdown.cancel();
-    let _ = agent_task.await;
+    let _ = within("the agent task to stop", agent_task).await;
     master.shutdown.cancel();
     sup.lock().await.shutdown_all();
     drop(taken);
@@ -451,7 +471,10 @@ async fn register(
     });
     let key = api_key.parse().map_err(|_| Status::internal("api key"))?;
     request.metadata_mut().insert("x-api-key", key);
-    Ok(client.register(request).await?.into_inner().refresh_key)
+    Ok(within("Register", client.register(request))
+        .await?
+        .into_inner()
+        .refresh_key)
 }
 
 /// Opens a `WatchConfig` stream and takes its first revision, so the session is
@@ -464,33 +487,54 @@ async fn watch(
     request
         .metadata_mut()
         .insert("x-refresh-key", refresh_key.parse()?);
-    let mut stream = client.watch_config(request).await?.into_inner();
-    let first = stream.message().await?.expect("the first revision arrives");
+    let mut stream = within("WatchConfig", client.watch_config(request))
+        .await?
+        .into_inner();
+    let first = within("the first revision", stream.message())
+        .await?
+        .expect("the first revision arrives");
     Ok((stream, first.revision))
 }
 
 #[tokio::test]
 async fn a_heartbeating_stream_keeps_its_session_against_a_second_worker() -> TestResult {
-    // A lease shorter than the test's own waits: only the heartbeat can hold it.
+    // A lease far shorter than the window this test keeps the stream open for: once
+    // the first grant's deadline has passed, only the heartbeat can still hold it.
+    let ttl = Duration::from_secs(3);
     let lease = SessionLease {
-        ttl: Duration::from_millis(600),
-        heartbeat: Duration::from_millis(100),
+        ttl,
+        heartbeat: Duration::from_millis(250),
     };
     let (master, api_key) = boot_master(lease).await?;
     let canvas = build_canvas(&master.db).await?;
     let server_key = ids::record_key(&canvas.server.0);
 
-    let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
+    let mut client = within(
+        "a channel to the master",
+        WorkerAgentClient::connect(format!("http://{}", master.addr)),
+    )
+    .await?;
     let first_key = register(&mut client, &server_key, &api_key).await?;
     let (stream, revision) = watch(&mut client, &first_key).await?;
+    // The master stamped the lease before this line, so whatever deadline it granted
+    // has certainly passed by then: a refusal after it can only come from a renewal.
+    let grant_expired_by = std::time::Instant::now() + ttl;
 
-    // Well past the lease: a second worker aimed at the same server stays locked out
-    // instead of trading the server back and forth with the incumbent.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
-    let status = register(&mut client, &server_key, &api_key)
-        .await
-        .expect_err("a live session must not be stolen");
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    // A second worker aimed at the same server stays locked out instead of trading the
+    // server back and forth with the incumbent. Polled rather than measured against one
+    // absolute margin: every attempt must be refused, and the loop only ends once an
+    // attempt made after the original grant lapsed was refused too.
+    loop {
+        let attempted_at = std::time::Instant::now();
+        let status = register(&mut client, &server_key, &api_key)
+            .await
+            .expect_err("a live session must not be stolen");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        if attempted_at > grant_expired_by {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     // The incumbent is untouched and still owns the stream: it can ack exactly the
     // revision the master handed it.
@@ -500,7 +544,7 @@ async fn a_heartbeating_stream_keeps_its_session_against_a_second_worker() -> Te
     });
     ack.metadata_mut()
         .insert("x-refresh-key", first_key.parse()?);
-    client.ack_config(ack).await?;
+    within("AckConfig", client.ack_config(ack)).await?;
 
     drop(stream);
     master.shutdown.cancel();
@@ -516,7 +560,11 @@ async fn an_ended_stream_hands_the_session_back_at_once() -> TestResult {
     let canvas = build_canvas(&master.db).await?;
     let server_key = ids::record_key(&canvas.server.0);
 
-    let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
+    let mut client = within(
+        "a channel to the master",
+        WorkerAgentClient::connect(format!("http://{}", master.addr)),
+    )
+    .await?;
     let first_key = register(&mut client, &server_key, &api_key).await?;
     let (stream, _) = watch(&mut client, &first_key).await?;
     drop(stream);
@@ -544,11 +592,13 @@ async fn an_ended_stream_hands_the_session_back_at_once() -> TestResult {
         .metadata_mut()
         .insert("x-refresh-key", first_key.parse()?);
     assert_eq!(
-        client
-            .ack_config(stale)
-            .await
-            .expect_err("the superseded key must be rejected")
-            .code(),
+        within(
+            "AckConfig with the superseded key",
+            client.ack_config(stale)
+        )
+        .await
+        .expect_err("the superseded key must be rejected")
+        .code(),
         tonic::Code::Unauthenticated
     );
 
@@ -562,15 +612,18 @@ async fn a_newer_stream_fences_the_previous_one() -> TestResult {
     let canvas = build_canvas(&master.db).await?;
     let server_key = ids::record_key(&canvas.server.0);
 
-    let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
+    let mut client = within(
+        "a channel to the master",
+        WorkerAgentClient::connect(format!("http://{}", master.addr)),
+    )
+    .await?;
     let refresh_key = register(&mut client, &server_key, &api_key).await?;
     let (mut first, _) = watch(&mut client, &refresh_key).await?;
     let _second = watch(&mut client, &refresh_key).await?;
 
     // One connection per server: the older stream is told to go away instead of
     // lingering as a second consumer of the same server's config.
-    let status = first
-        .message()
+    let status = within("the fenced stream to end", first.message())
         .await
         .expect_err("the fenced stream must be ended by the master");
     assert_eq!(status.code(), tonic::Code::Aborted);
@@ -592,7 +645,11 @@ async fn a_rotated_refresh_key_ends_an_open_stream() -> TestResult {
     let canvas = build_canvas(&master.db).await?;
     let server_key = ids::record_key(&canvas.server.0);
 
-    let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
+    let mut client = within(
+        "a channel to the master",
+        WorkerAgentClient::connect(format!("http://{}", master.addr)),
+    )
+    .await?;
     let first_key = register(&mut client, &server_key, &api_key).await?;
     let (mut stream, _) = watch(&mut client, &first_key).await?;
 
@@ -609,8 +666,7 @@ async fn a_rotated_refresh_key_ends_an_open_stream() -> TestResult {
     let second_key = register(&mut client, &server_key, &api_key).await?;
     assert_ne!(first_key, second_key);
 
-    let status = stream
-        .message()
+    let status = within("the superseded stream to end", stream.message())
         .await
         .expect_err("the superseded stream must be ended by the master");
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
@@ -625,7 +681,11 @@ async fn a_refresh_key_survives_a_master_restart() -> TestResult {
     let canvas = build_canvas(&master.db).await?;
     let server_key = ids::record_key(&canvas.server.0);
 
-    let mut client = WorkerAgentClient::connect(format!("http://{}", master.addr)).await?;
+    let mut client = within(
+        "a channel to the master",
+        WorkerAgentClient::connect(format!("http://{}", master.addr)),
+    )
+    .await?;
     let refresh_key = register(&mut client, &server_key, &api_key).await?;
 
     // The digest lives in the database, not in the master's memory.
@@ -633,7 +693,11 @@ async fn a_refresh_key_survives_a_master_restart() -> TestResult {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let restart = CancellationToken::new();
     let addr = serve(&master.db, &master.hub, &restart, SessionLease::default()).await?;
-    let mut client = WorkerAgentClient::connect(format!("http://{addr}")).await?;
+    let mut client = within(
+        "a channel to the restarted master",
+        WorkerAgentClient::connect(format!("http://{addr}")),
+    )
+    .await?;
     // Take the snapshot through a stream, the way a worker does: the ack is only
     // valid for the revision the database handed this session.
     let (stream, revision) = watch(&mut client, &refresh_key).await?;
@@ -643,8 +707,7 @@ async fn a_refresh_key_survives_a_master_restart() -> TestResult {
     });
     ack.metadata_mut()
         .insert("x-refresh-key", refresh_key.parse()?);
-    client
-        .ack_config(ack)
+    within("AckConfig after the restart", client.ack_config(ack))
         .await
         .expect("the refresh key survives a master restart");
     let view = master

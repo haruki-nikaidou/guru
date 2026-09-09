@@ -9,10 +9,11 @@ per server, and streams every new revision to the workers that registered for it
 ```
 src/
 ├── lib.rs          # crate root: declares the modules below
-├── config.rs       # strongly typed module configuration (DB-backed, Redis-cached)
+├── config.rs       # typed config scaffold, not wired to any setting yet
 ├── utils/ids.rs    # record id ↔ wire string conversion
 ├── entities/
-│   └── surreal/    # canvas, server, node, port, connection, view, topology
+│   └── surreal/    # canvas, server, node, port, connection, view, topology,
+│                   # plus health/dns rows for later stages
 ├── services/       # CRUD, topology rules, derivation, convergence, rollout, agent, watch
 ├── events/         # `CanvasDirty`, the derivation trigger
 ├── hooks/derive.rs # the derivation consumer and its cron sweep
@@ -88,7 +89,7 @@ new revision, so unrelated servers never restart their listeners.
 
 - `rpc` depends on `services` (and `rpguru_sdk`); the watch hub lives in
   `services::watch` so nothing below the edge depends on the edge.
-- `services` depend on `entities` and `config`; every query is a `Processor` in
+- `services` depend on `entities`; every query is a `Processor` in
   `entities/surreal`.
 - The schema lives in `database/schema/orchestration.surql`; the integration tests
   apply that exact file to a `mem://` database.

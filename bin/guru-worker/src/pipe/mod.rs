@@ -49,7 +49,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
             let remaining = &data[pos..];
             let n = remaining.len().min(buf.remaining());
             buf.put_slice(&remaining[..n]);
-            this.prefix.set_position((pos + n) as u64);
+            this.prefix.set_position(pos.saturating_add(n) as u64);
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut this.inner).poll_read(cx, buf)

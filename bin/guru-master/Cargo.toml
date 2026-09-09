@@ -27,7 +27,6 @@ amqprs = { workspace = true }
 
 # Shared dependencies
 surrealdb = { workspace = true }
-redis = { workspace = true }
 
 # CLI
 clap = { workspace = true }
@@ -36,11 +35,7 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Data types
-chrono = { workspace = true }
-
 # Streaming
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 
 # Observability

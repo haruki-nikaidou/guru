@@ -1,8 +1,19 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Name of the environment variable holding the operator API key.
+///
+/// Deliberately not a flag: argv is world-readable through `ps`.
+pub const API_KEY_ENV: &str = "GURU_API_KEY";
+
 #[derive(Debug, Clone, Parser)]
-#[command(name = "guru-worker", about = "guru data-plane worker")]
+#[command(
+    name = "guru-worker",
+    about = "guru data-plane worker",
+    after_help = "Agent mode needs the operator API key in the GURU_API_KEY environment \
+                  variable or in the file named by --api-key-file (exactly one of the two). \
+                  The key is never accepted on the command line."
+)]
 pub struct Cli {
     /// Standalone mode: path of the TOML config to load and reload on SIGHUP.
     #[arg(
@@ -13,11 +24,12 @@ pub struct Cli {
     )]
     pub config: Option<PathBuf>,
     /// Agent mode: `guru-master` worker endpoint, e.g. `http://10.0.0.1:50052`.
-    #[arg(long, env = "GURU_MASTER", requires_all = ["api_key", "server"])]
+    #[arg(long, env = "GURU_MASTER", requires_all = ["server"])]
     pub master: Option<String>,
-    /// Operator API key used once per session to register with the master.
-    #[arg(long, env = "GURU_API_KEY")]
-    pub api_key: Option<String>,
+    /// File holding the operator API key used once per session to register with the
+    /// master; trailing whitespace is trimmed. Alternative to `GURU_API_KEY`.
+    #[arg(long, env = "GURU_API_KEY_FILE")]
+    pub api_key_file: Option<PathBuf>,
     /// `orchestration_server` record key.
     #[arg(long, env = "GURU_SERVER_ID")]
     pub server: Option<String>,

@@ -87,9 +87,14 @@ pub enum AgentSignal {
     Fenced(WatchFence),
 }
 
-/// `(desired, in_flight, failed)` revisions: the whole observable state of a view
-/// as far as a stream is concerned.
-type ViewState = (Option<i64>, Option<i64>, Option<i64>);
+/// `(desired, in_flight, applied, failed)` revisions: the whole observable state
+/// of a view as far as a stream is concerned.
+///
+/// `applied` is part of it because it is part of what the conditional take
+/// compares (`desired.revision != applied.revision`): clearing a settled server's
+/// applied snapshot changes nothing else, and a stream that is not woken for it
+/// never takes the snapshot its dependants wait for.
+type ViewState = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
 
 struct Entry {
     tx: broadcast::Sender<AgentSignal>,
@@ -232,6 +237,7 @@ impl WatchHub {
         let observed = (
             state.desired_revision,
             state.in_flight_revision,
+            state.applied_revision,
             state.failed_revision,
         );
         if entry.last != Some(observed) {
@@ -283,6 +289,7 @@ mod tests {
             watch_epoch: fence.epoch,
             desired_revision: Some(desired),
             in_flight_revision: None,
+            applied_revision: None,
             failed_revision: None,
         }
     }

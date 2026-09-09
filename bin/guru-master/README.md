@@ -20,8 +20,9 @@ Running the same image in different modes keeps build and deployment uniform.
 
 ## Responsibilities
 
-- Load configuration and construct shared dependencies (PostgreSQL pool, Redis
-  connection, AMQP pool).
+- Load configuration and construct shared dependencies (SurrealDB connection,
+  AMQP pool). The broker is mandatory in every mode but `cron`: startup fails
+  when `AMQP_URI` is unset or unreachable.
 - Construct each module's services and hooks, injecting those dependencies.
 - Mount the selected worker and run until a shutdown signal is received.
 - Set up observability (tracing / OpenTelemetry) and health checks.

@@ -258,14 +258,22 @@ fn derive_destination(
                 .clone()
                 .unwrap_or_else(|| pod_ip.ip.clone());
             let port = cfg.override_port.unwrap_or(pod_cfg.port);
-            ForwardingTo::Relay {
-                protocol,
-                destination: Remote::parse(&format!("{host}:{port}")).map_err(|_| {
+            // An IP literal becomes a socket address directly: an unbracketed IPv6
+            // host would otherwise round-trip through `Remote::parse` as a domain
+            // name and be handed to the worker's resolver. `override_ip_address` is
+            // a free-form string, so a genuine hostname still takes the parse path.
+            let destination = match host.parse::<IpAddr>() {
+                Ok(address) => Remote::Address(SocketAddr::new(address, port)),
+                Err(_) => Remote::parse(&format!("{host}:{port}")).map_err(|_| {
                     DeriveError::InvalidDestination {
                         node: node.node.name.clone(),
                         destination: format!("{host}:{port}"),
                     }
                 })?,
+            };
+            ForwardingTo::Relay {
+                protocol,
+                destination,
                 sni: None,
             }
         }

@@ -224,10 +224,9 @@ impl Processor<ChangeOwnEmail> for AccountService {
             .db
             .process(FindAccountByEmail { email: &new_email })
             .await?
+            && existing.id.0 != account.id.0
         {
-            if existing.id.0 != account.id.0 {
-                return Ok(ChangeEmailResult::EmailTaken);
-            }
+            return Ok(ChangeEmailResult::EmailTaken);
         }
         self.db
             .process(UpdateAccountEmail {

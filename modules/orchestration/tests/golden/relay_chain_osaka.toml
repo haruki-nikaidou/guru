@@ -11,6 +11,6 @@ listen = "198.51.100.10:9443"
 relay_type = "tcp"
 
 [forwarding.to]
-type = "Relay"
+type = "relay"
 protocol = "tcp"
 destination = "192.0.2.10:9443"

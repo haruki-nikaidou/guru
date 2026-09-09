@@ -6,3 +6,34 @@ name = "orchestration_tables_visible"
 kind = "schema_metadata"
 sql = "INFO FOR DB;"
 contains = ["orchestration_canvas", "orchestration_server", "server_ip_record", "orchestration_node", "orchestration_port", "orchestration_edge_connection", "orchestration_server_config_view"]
+
+# The "at most one edge per port" invariant is enforced by the database, not only
+# by the topology checker: without UNIQUE, two concurrent connects both persist.
+[[cases]]
+name = "edge_endpoint_indexes_are_unique"
+kind = "schema_metadata"
+sql = "INFO FOR TABLE orchestration_edge_connection;"
+contains = [
+    "DEFINE INDEX orchestration_edge_connection_in ON orchestration_edge_connection FIELDS in UNIQUE",
+    "DEFINE INDEX orchestration_edge_connection_out ON orchestration_edge_connection FIELDS out UNIQUE",
+]
+
+# Exactly one config view row per server.
+[[cases]]
+name = "config_view_server_index_is_unique"
+kind = "schema_metadata"
+sql = "INFO FOR TABLE orchestration_server_config_view;"
+contains = [
+    "DEFINE INDEX orchestration_server_config_view_server ON orchestration_server_config_view FIELDS server UNIQUE",
+]
+
+# The derivation fence compares these two counters, so both must be integers that
+# start at 0 on a freshly created canvas.
+[[cases]]
+name = "canvas_generation_counters"
+kind = "schema_metadata"
+sql = "INFO FOR TABLE orchestration_canvas;"
+contains = [
+    "DEFINE FIELD generation ON orchestration_canvas TYPE int DEFAULT 0",
+    "DEFINE FIELD derived_generation ON orchestration_canvas TYPE int DEFAULT 0",
+]

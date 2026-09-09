@@ -113,11 +113,25 @@ pub fn port_layout(spec: &NodeSpec, item_count: u32) -> Result<Vec<NewPort>, Orc
     })
 }
 
+/// The largest member count a load-balance node may ask for.
+///
+/// Every member becomes a port row and an entry in the derived worker config, and
+/// the request carries the count as an unbounded `u32`, so the bound is what keeps
+/// a single request from asking the master to allocate billions of rows. 256 is far
+/// above any realistic fan-out (a load balancer spreading over 256 exits) while
+/// staying cheap to build and validate.
+pub const MAX_LOAD_BALANCE_MEMBERS: u32 = 256;
+
 fn load_balance_count(item_count: u32) -> Result<i64, OrchestrationError> {
     if item_count < 2 {
         return Err(OrchestrationError::Invalid(
             "load balance nodes need at least 2 members".into(),
         ));
+    }
+    if item_count > MAX_LOAD_BALANCE_MEMBERS {
+        return Err(OrchestrationError::Invalid(format!(
+            "load balance nodes take at most {MAX_LOAD_BALANCE_MEMBERS} members, got {item_count}"
+        )));
     }
     Ok(i64::from(item_count))
 }
@@ -344,31 +358,45 @@ pub struct UpdateNodeMeta {
     pub node: NodeId,
     pub name: String,
     pub comment: String,
-    pub position: CanvasUiPosition,
+    /// `None` leaves the node where it is.
+    pub position: Option<CanvasUiPosition>,
 }
 
 impl Processor<UpdateNodeMeta> for NodeService {
-    type Output = NodeEntity;
+    type Output = NodeWithPorts;
     type Error = OrchestrationError;
     #[tracing::instrument(name = "Service:UpdateNodeMeta", skip_all, err)]
     async fn process(&self, input: UpdateNodeMeta) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::EditWorkspace)?;
-        self.db
+        let old = self
+            .db
             .process(FindNodeById {
                 id: input.node.clone(),
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
-        // Metadata only: the derived config does not depend on any of these.
-        Ok(self
+        let canvas = old.canvas.clone();
+        // Whether this edit renames the node is decided by the query, in the same
+        // transaction as the write and the generation bump, so a concurrent
+        // metadata write cannot overwrite a rename without scheduling a
+        // derivation. The read above only resolves the canvas and NotFound.
+        let updated = self
             .db
             .process(UpdateNodeMetaRow {
                 id: input.node,
+                canvas: canvas.clone(),
                 name: input.name,
                 comment: input.comment,
                 position: input.position,
             })
-            .await?)
+            .await?;
+        if updated.renamed {
+            self.notifier.notify(&canvas).await;
+        }
+        Ok(NodeWithPorts {
+            node: updated.node,
+            ports: updated.ports,
+        })
     }
 }
 

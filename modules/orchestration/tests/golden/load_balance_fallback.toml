@@ -10,17 +10,17 @@ receive_proxy_protocol = "v2"
 listen_as = "raw"
 
 [forwarding.to]
-type = "LoadBalance"
+type = "load_balance"
 strategy = "fallback"
 
 [[forwarding.to.members]]
-type = "Exit"
+type = "exit"
 destination = "10.0.0.5:8080"
 
 [[forwarding.to.members]]
-type = "Exit"
+type = "exit"
 destination = "backend.internal:9000"
 
 [[forwarding.to.members]]
-type = "Exit"
+type = "exit"
 destination = "10.0.0.7:8080"

@@ -1,3 +1,8 @@
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+#![warn(clippy::arithmetic_side_effects)]
+
 use clap::Parser;
 
 fn main() -> std::process::ExitCode {

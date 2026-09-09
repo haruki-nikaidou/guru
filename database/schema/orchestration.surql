@@ -58,8 +58,10 @@ DEFINE FIELD position ON orchestration_port TYPE int;
 DEFINE INDEX orchestration_port_owner ON orchestration_port FIELDS owner;
 
 DEFINE TABLE orchestration_edge_connection TYPE RELATION IN orchestration_port OUT orchestration_port SCHEMAFULL;
-DEFINE INDEX orchestration_edge_connection_in ON orchestration_edge_connection FIELDS in;
-DEFINE INDEX orchestration_edge_connection_out ON orchestration_edge_connection FIELDS out;
+-- A port carries at most one edge; the database, not only the topology checker,
+-- enforces it, so two concurrent connects cannot both persist an edge on one port.
+DEFINE INDEX orchestration_edge_connection_in ON orchestration_edge_connection FIELDS in UNIQUE;
+DEFINE INDEX orchestration_edge_connection_out ON orchestration_edge_connection FIELDS out UNIQUE;
 
 DEFINE TABLE orchestration_server_config_view SCHEMAFULL;
 DEFINE FIELD server ON orchestration_server_config_view TYPE record<orchestration_server>;

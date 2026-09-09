@@ -8,15 +8,15 @@
 //! ## Module layout
 //!
 //! - [`entities`] — persistence layer. SurrealDB row types plus one `Processor` per
-//!   query in [`entities::surreal`], and Redis key/value types in
-//!   [`entities::redis`].
+//!   query in [`entities::surreal`].
 //! - [`services`] — business logic: canvas/server/node/edge CRUD, the topology
 //!   checker, the config deriver, convergence and the worker agent.
 //! - [`rpc`] — the transport edge: the operator `Orchestration` service and the
 //!   `WorkerAgent` service workers talk to, plus their middleware.
 //! - [`events`] — AMQP payloads this module publishes or consumes.
 //! - [`hooks`] — background reactors, notably the derivation hook and its sweep.
-//! - [`config`] — typed module configuration.
+//! - [`config`] — the typed module-configuration scaffold, kept for later: nothing
+//!   in this module is wired to an operator-visible setting yet.
 //! - [`utils`] — record-id conversion helpers shared by the edge.
 //!
 //! ## How a change reaches a worker

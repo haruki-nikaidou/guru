@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-compact_str = { version = "0.10", features = ["serde"] }
+compact_str = { workspace = true }
 smallvec = { version = "1.15", features = [
     "serde",
     "union",
@@ -16,4 +16,3 @@ smallvec = { version = "1.15", features = [
 ] }
 toml = "1"
 thiserror = { workspace = true }
-tracing = { workspace = true }

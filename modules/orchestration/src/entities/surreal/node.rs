@@ -207,7 +207,7 @@ pub struct FindNodeById {
 impl Processor<FindNodeById> for SurrealProcessor {
     type Output = Option<NodeEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindNodeById", skip(self), err)]
+    #[tracing::instrument(name = "Query:FindNodeById", skip_all, err)]
     async fn process(&self, input: FindNodeById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -226,7 +226,7 @@ pub struct FindNodeWithPorts {
 impl Processor<FindNodeWithPorts> for SurrealProcessor {
     type Output = Option<NodeWithPorts>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindNodeWithPorts", skip(self), err)]
+    #[tracing::instrument(name = "Query:FindNodeWithPorts", skip_all, err)]
     async fn process(&self, input: FindNodeWithPorts) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -243,27 +243,44 @@ impl Processor<FindNodeWithPorts> for SurrealProcessor {
     }
 }
 
+/// Updates a node's editable metadata.
+///
+/// `position` is only written when it is `Some`, so an edit that leaves the
+/// position out does not move the node. Whether the edit renamed the node is
+/// decided inside the transaction, which is also where the canvas generation is
+/// bumped, so a concurrent metadata write cannot land a rename without it.
 pub struct UpdateNodeMetaRow {
     pub id: NodeId,
+    pub canvas: CanvasId,
     pub name: String,
     pub comment: String,
-    pub position: CanvasUiPosition,
+    pub position: Option<CanvasUiPosition>,
+}
+
+/// A node after a metadata update, plus whether the name actually changed.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct NodeMetaUpdated {
+    pub renamed: bool,
+    pub node: NodeEntity,
+    pub ports: Vec<PortEntity>,
 }
 
 impl Processor<UpdateNodeMetaRow> for SurrealProcessor {
-    type Output = NodeEntity;
+    type Output = NodeMetaUpdated;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:UpdateNodeMetaRow", skip_all, err, fields(id = ?input.id))]
+    #[tracing::instrument(name = "Query-Transaction:UpdateNodeMetaRow", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: UpdateNodeMetaRow) -> Result<Self::Output, Self::Error> {
+        // Statement 0 is BEGIN; the RETURN below is statement 5.
         let mut resp = self
             .db()
-            .query("UPDATE $id SET name = $name, comment = $comment, position = $position RETURN AFTER")
+            .query(include_str!("../../../sql/node/update_node_meta_row.surql"))
             .bind(("id", input.id))
+            .bind(("canvas", input.canvas))
             .bind(("name", input.name))
             .bind(("comment", input.comment))
             .bind(("position", input.position))
             .await?;
-        resp.take::<Option<NodeEntity>>(0)?
+        resp.take::<Option<NodeMetaUpdated>>(5)?
             .ok_or_else(|| surrealdb::Error::internal("node not found".to_string()))
     }
 }
@@ -308,7 +325,7 @@ pub struct DeleteNodeRow {
 impl Processor<DeleteNodeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:DeleteNodeRow", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:DeleteNodeRow", skip_all, err)]
     async fn process(&self, input: DeleteNodeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(include_str!("../../../sql/node/delete_node_row.surql"))

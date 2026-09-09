@@ -110,7 +110,8 @@ pub(crate) type CanvasRows = (
     Vec<EdgeConnectionEntity>,
 );
 
-/// Reads the servers, ip records, nodes (with their ports) and edges of one canvas.
+/// Reads the servers, ip records, nodes (with their ports) and edges of one canvas
+/// in one transaction.
 async fn load_canvas(
     sp: &SurrealProcessor,
     canvas: &CanvasId,
@@ -120,7 +121,8 @@ async fn load_canvas(
         .query(include_str!("../../../sql/topology/load_canvas.surql"))
         .bind(("canvas", canvas.clone()))
         .await?;
-    group_rows(&mut resp, 0)
+    // Statement 0 is the BEGIN of `load_canvas.surql`; the reads start at 1.
+    group_rows(&mut resp, 1)
 }
 
 /// Groups the five canvas reads of `load_canvas.surql`, whose first statement sits

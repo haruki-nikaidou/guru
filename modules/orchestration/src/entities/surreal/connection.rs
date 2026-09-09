@@ -26,7 +26,7 @@ pub struct ConnectPorts {
 impl Processor<ConnectPorts> for SurrealProcessor {
     type Output = EdgeConnectionEntity;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:ConnectPorts", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:ConnectPorts", skip_all, err)]
     async fn process(&self, input: ConnectPorts) -> Result<Self::Output, Self::Error> {
         // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
@@ -55,7 +55,7 @@ pub struct FindEdgeById {
 impl Processor<FindEdgeById> for SurrealProcessor {
     type Output = Option<EdgeConnectionEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:FindEdgeById", skip(self), err)]
+    #[tracing::instrument(name = "Query:FindEdgeById", skip_all, err)]
     async fn process(&self, input: FindEdgeById) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
@@ -63,32 +63,6 @@ impl Processor<FindEdgeById> for SurrealProcessor {
             .bind(("id", input.id))
             .await?;
         resp.take::<Option<EdgeConnectionEntity>>(0)
-    }
-}
-
-#[derive(Debug)]
-pub struct ListEdgesByCanvas {
-    pub canvas: CanvasId,
-}
-
-impl Processor<ListEdgesByCanvas> for SurrealProcessor {
-    type Output = Vec<EdgeConnectionEntity>;
-    type Error = surrealdb::Error;
-    #[tracing::instrument(
-        name = "Query:ListEdgesByCanvas",
-        skip(self),
-        err,
-        fields(result_count)
-    )]
-    async fn process(&self, input: ListEdgesByCanvas) -> Result<Self::Output, Self::Error> {
-        let mut resp = self
-            .db()
-            .query("SELECT * FROM orchestration_edge_connection WHERE in.owner.canvas = $canvas")
-            .bind(("canvas", input.canvas))
-            .await?;
-        let result = resp.take::<Vec<EdgeConnectionEntity>>(0)?;
-        tracing::Span::current().record("result_count", result.len());
-        Ok(result)
     }
 }
 
@@ -101,7 +75,7 @@ pub struct DeleteEdgeRow {
 impl Processor<DeleteEdgeRow> for SurrealProcessor {
     type Output = ();
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query-Transaction:DeleteEdgeRow", skip(self), err)]
+    #[tracing::instrument(name = "Query-Transaction:DeleteEdgeRow", skip_all, err)]
     async fn process(&self, input: DeleteEdgeRow) -> Result<Self::Output, Self::Error> {
         self.db()
             .query(

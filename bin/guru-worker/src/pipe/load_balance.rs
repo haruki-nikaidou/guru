@@ -21,17 +21,26 @@ pub async fn connect_balanced(
     }
     match strategy {
         LoadBalanceStrategy::RoundRobin => {
-            let i = next.fetch_add(1, Ordering::Relaxed) % members.len();
+            // The counter is meant to wrap; `members` is non-empty, so the fallback
+            // index is unreachable.
+            let i = next
+                .fetch_add(1, Ordering::Relaxed)
+                .checked_rem(members.len())
+                .unwrap_or(0);
             Box::pin(connect_target(&members[i], client_addr)).await
         }
         LoadBalanceStrategy::Random => {
-            let i = (xorshift(rng) as usize) % members.len();
+            let i = (xorshift(rng) as usize)
+                .checked_rem(members.len())
+                .unwrap_or(0);
             Box::pin(connect_target(&members[i], client_addr)).await
         }
         LoadBalanceStrategy::IpHash => {
             let mut h = DefaultHasher::new();
             client_addr.ip().hash(&mut h);
-            let i = (h.finish() as usize) % members.len();
+            let i = (h.finish() as usize)
+                .checked_rem(members.len())
+                .unwrap_or(0);
             Box::pin(connect_target(&members[i], client_addr)).await
         }
         LoadBalanceStrategy::Fallback => {
