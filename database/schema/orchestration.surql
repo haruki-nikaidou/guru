@@ -28,6 +28,8 @@ DEFINE FIELD applied_revision ON orchestration_server TYPE int DEFAULT 0;
 DEFINE FIELD last_apply_error ON orchestration_server TYPE option<string>;
 DEFINE FIELD current_dynamic_refresh_key ON orchestration_server TYPE option<string>;
 DEFINE FIELD refresh_key_generation ON orchestration_server TYPE int DEFAULT 0;
+DEFINE FIELD watch_epoch ON orchestration_server TYPE int DEFAULT 0;
+DEFINE FIELD session_lease_until ON orchestration_server TYPE option<datetime>;
 DEFINE FIELD last_seen_at ON orchestration_server TYPE option<datetime>;
 DEFINE INDEX orchestration_server_canvas ON orchestration_server FIELDS canvas;
 DEFINE INDEX orchestration_server_refresh_key ON orchestration_server FIELDS current_dynamic_refresh_key;

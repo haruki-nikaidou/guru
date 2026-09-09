@@ -22,6 +22,13 @@ pub struct ServerEntity {
     pub last_apply_error: Option<String>,
     pub current_dynamic_refresh_key: Option<String>,
     pub refresh_key_generation: i64,
+    /// Monotonic claim counter for the single live `WatchConfig` stream. Bumped by
+    /// every claim, so the newest stream always wins and no lease can strand a
+    /// server after a master or worker crash.
+    pub watch_epoch: i64,
+    /// While this is in the future, one worker session owns the server: another
+    /// registration is refused until it lapses or the owning stream releases it.
+    pub session_lease_until: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
@@ -85,7 +92,8 @@ impl Processor<CreateServer> for SurrealProcessor {
                      canvas: $canvas, name: $name, icon: $icon, comment: $comment,
                      position: $position, ipv6_resolve: $ipv6_resolve, log_level: $log_level,
                      desired_revision: 0, applied_revision: 0, last_apply_error: NONE,
-                     current_dynamic_refresh_key: NONE, refresh_key_generation: 0,
+                     current_dynamic_refresh_key: NONE, refresh_key_generation: 0, watch_epoch: 0,
+                     session_lease_until: NONE,
                      last_seen_at: NONE
                  }",
             )
@@ -295,32 +303,142 @@ impl Processor<DeleteServerIpRow> for SurrealProcessor {
     }
 }
 
-/// Replaces the stored refresh-key digest and returns the new generation, which
-/// invalidates every stream still holding the previous key.
+/// Rotates the stored refresh-key digest and takes the server's session lease.
+///
+/// The rotation is refused while another worker session is still alive, so a
+/// second worker configured with the same `server_id` cannot steal a running
+/// server: it is rejected for as long as the incumbent heartbeats. Takeover is
+/// therefore only possible once the lease lapses (the incumbent crashed) or is
+/// released (the incumbent's stream ended).
+#[derive(Debug)]
 pub struct RotateServerRefreshKey {
     pub server: ServerId,
     pub digest: String,
     pub now: DateTime<Utc>,
+    /// The lease deadline the new session gets.
+    pub lease_until: DateTime<Utc>,
 }
 
 impl Processor<RotateServerRefreshKey> for SurrealProcessor {
-    type Output = i64;
+    /// The rotated row, or `None` when a live session still holds the server.
+    type Output = Option<ServerEntity>;
     type Error = surrealdb::Error;
     #[tracing::instrument(name = "Query:RotateServerRefreshKey", skip_all, err, fields(server = ?input.server))]
     async fn process(&self, input: RotateServerRefreshKey) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
             .query(
-                "UPDATE ONLY $server SET current_dynamic_refresh_key = $digest,
-                     refresh_key_generation += 1, last_seen_at = $now RETURN AFTER",
+                "UPDATE $server SET current_dynamic_refresh_key = $digest,
+                     refresh_key_generation += 1, session_lease_until = $lease_until,
+                     last_seen_at = $now
+                 WHERE session_lease_until = NONE OR session_lease_until <= $now
+                 RETURN AFTER",
             )
             .bind(("server", input.server))
             .bind(("digest", input.digest))
             .bind(("now", input.now))
+            .bind(("lease_until", input.lease_until))
             .await?;
-        resp.take::<Option<ServerEntity>>(0)?
-            .map(|s| s.refresh_key_generation)
-            .ok_or_else(|| surrealdb::Error::internal("server not found".to_string()))
+        Ok(resp.take::<Vec<ServerEntity>>(0)?.into_iter().next())
+    }
+}
+
+/// Claims the single live `WatchConfig` session of one server.
+///
+/// The claim only succeeds while the caller still holds the current refresh-key
+/// generation — i.e. it is the worker that registration handed the lease to — and
+/// it bumps `watch_epoch`, so `(refresh_key_generation, watch_epoch)` totally
+/// orders every session a server ever had. That ordering is the fence: a stream is
+/// authoritative exactly while the row still carries the pair it won.
+#[derive(Debug)]
+pub struct ClaimServerWatchSession {
+    pub server: ServerId,
+    /// The generation the claiming stream authenticated with.
+    pub generation: i64,
+    pub now: DateTime<Utc>,
+    pub lease_until: DateTime<Utc>,
+}
+
+impl Processor<ClaimServerWatchSession> for SurrealProcessor {
+    /// The claimed row, or `None` when the generation is no longer current.
+    type Output = Option<ServerEntity>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:ClaimServerWatchSession", skip(self), err)]
+    async fn process(&self, input: ClaimServerWatchSession) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query(
+                "UPDATE $server SET watch_epoch += 1, session_lease_until = $lease_until,
+                     last_seen_at = $now
+                 WHERE refresh_key_generation = $generation RETURN AFTER",
+            )
+            .bind(("server", input.server))
+            .bind(("generation", input.generation))
+            .bind(("now", input.now))
+            .bind(("lease_until", input.lease_until))
+            .await?;
+        Ok(resp.take::<Vec<ServerEntity>>(0)?.into_iter().next())
+    }
+}
+
+/// The heartbeat of a live stream: extends the lease while the fence is still ours.
+#[derive(Debug)]
+pub struct RenewServerWatchSession {
+    pub server: ServerId,
+    pub generation: i64,
+    pub epoch: i64,
+    pub now: DateTime<Utc>,
+    pub lease_until: DateTime<Utc>,
+}
+
+impl Processor<RenewServerWatchSession> for SurrealProcessor {
+    /// `false` once the session has been fenced out; the stream must then end.
+    type Output = bool;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:RenewServerWatchSession", skip(self), err)]
+    async fn process(&self, input: RenewServerWatchSession) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query(
+                "UPDATE $server SET session_lease_until = $lease_until, last_seen_at = $now
+                 WHERE refresh_key_generation = $generation AND watch_epoch = $epoch
+                 RETURN AFTER",
+            )
+            .bind(("server", input.server))
+            .bind(("generation", input.generation))
+            .bind(("epoch", input.epoch))
+            .bind(("now", input.now))
+            .bind(("lease_until", input.lease_until))
+            .await?;
+        Ok(!resp.take::<Vec<ServerEntity>>(0)?.is_empty())
+    }
+}
+
+/// Drops the lease when a stream ends cleanly, so a restarting worker can register
+/// again immediately instead of waiting the lease out.
+#[derive(Debug)]
+pub struct ReleaseServerWatchSession {
+    pub server: ServerId,
+    pub generation: i64,
+    pub epoch: i64,
+}
+
+impl Processor<ReleaseServerWatchSession> for SurrealProcessor {
+    type Output = ();
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:ReleaseServerWatchSession", skip(self), err)]
+    async fn process(&self, input: ReleaseServerWatchSession) -> Result<Self::Output, Self::Error> {
+        self.db()
+            .query(
+                "UPDATE $server SET session_lease_until = NONE
+                 WHERE refresh_key_generation = $generation AND watch_epoch = $epoch",
+            )
+            .bind(("server", input.server))
+            .bind(("generation", input.generation))
+            .bind(("epoch", input.epoch))
+            .await?
+            .check()?;
+        Ok(())
     }
 }
 
@@ -414,6 +532,7 @@ pub struct ServerWatchState {
     pub id: ServerId,
     pub desired_revision: i64,
     pub refresh_key_generation: i64,
+    pub watch_epoch: i64,
 }
 
 pub struct ListServerWatchState {
@@ -428,7 +547,7 @@ impl Processor<ListServerWatchState> for SurrealProcessor {
         let mut resp = self
             .db()
             .query(
-                "SELECT id, desired_revision, refresh_key_generation
+                "SELECT id, desired_revision, refresh_key_generation, watch_epoch
                  FROM orchestration_server WHERE id IN $servers",
             )
             .bind(("servers", input.servers))

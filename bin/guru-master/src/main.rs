@@ -29,7 +29,7 @@ use orchestration::services::edge::EdgeService;
 use orchestration::services::node::NodeService;
 use orchestration::services::rollout::RolloutService;
 use orchestration::services::server::ServerService;
-use orchestration::services::watch::{self, WatchHub};
+use orchestration::services::watch::{self, SessionLease, WatchHub};
 use rpguru_sdk::auth::auth_server::AuthServer;
 use rpguru_sdk::orchestration::orchestration_server::OrchestrationServer;
 use rpguru_sdk::orchestration_agent::worker_agent_server::WorkerAgentServer;
@@ -139,9 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         WorkerMode::WorkersGrpc => {
             let hub = WatchHub::default();
+            let lease = SessionLease::default();
             let agents = AgentService {
                 db: db.clone(),
                 hub: hub.clone(),
+                lease,
             };
             let token = CancellationToken::new();
             let poller = tokio::spawn(watch::run_poller(
@@ -154,11 +156,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agents: agents.clone(),
                 db: db.clone(),
                 hub,
+                lease,
             };
             tracing::info!(addr = %cli.workers_addr, "serving worker API");
             // `AuthLayer` is required here too: `Register` authenticates with an
             // operator API key before any refresh key exists.
+            //
+            // Keepalive is load-bearing: a worker that dies without closing its TCP
+            // connection would otherwise keep renewing its session lease and lock
+            // its replacement out of `Register`.
             Server::builder()
+                .http2_keepalive_interval(Some(lease.heartbeat))
+                .http2_keepalive_timeout(Some(lease.heartbeat))
                 .layer(AuthLayer::new(sessions, api_keys))
                 .layer(AgentLayer::new(agents))
                 .add_service(WorkerAgentServer::new(workers))

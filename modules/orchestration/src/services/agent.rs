@@ -10,7 +10,7 @@ use crate::entities::surreal::server::{
     ServerId, SetServerApplyError,
 };
 use crate::services::OrchestrationError;
-use crate::services::watch::WatchHub;
+use crate::services::watch::{SessionLease, WatchHub};
 use crate::utils::ids::record_key;
 use auth::services::identity::Identity;
 use auth::utils::rbac::Permission;
@@ -30,6 +30,7 @@ pub struct AgentIdentity {
 pub struct AgentService {
     pub db: SurrealProcessor,
     pub hub: WatchHub,
+    pub lease: SessionLease,
 }
 
 pub struct RegisterWorker {
@@ -54,14 +55,24 @@ impl Processor<RegisterWorker> for AgentService {
             .ok_or(OrchestrationError::NotFound)?;
 
         let secret = generate_refresh_key();
+        let now = Utc::now();
+        // Refused while another session still heartbeats: a second worker pointed at
+        // the same server must not be able to take it over just by reconnecting.
         let generation = self
             .db
             .process(RotateServerRefreshKey {
                 server: server.id.clone(),
                 digest: sha256_hex(&secret),
-                now: Utc::now(),
+                now,
+                lease_until: self.lease.until(now),
             })
-            .await?;
+            .await?
+            .ok_or_else(|| {
+                OrchestrationError::Conflict(
+                    "another worker session is live for this server".into(),
+                )
+            })?
+            .refresh_key_generation;
 
         // Reconcile what the worker reports it is actually running.
         if input.running_revision > 0 {
