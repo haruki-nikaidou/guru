@@ -473,6 +473,20 @@ fn check_specs(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
                     );
                 }
             }
+            // An exit whose destination is not filled in yet is the half-drawn case
+            // this module documents: a later edit completes it, and derivation
+            // already refuses to publish the pod behind it (`invalid_pods`). Only a
+            // destination that was actually written and cannot ever parse is an
+            // error.
+            NodeSpec::Exit(cfg) if cfg.destination.is_empty() => {
+                out.push(
+                    TopologyProblem::warning(
+                        ProblemKind::ExitDestinationInvalid,
+                        format!("exit {} has no destination yet", node.node.name),
+                    )
+                    .with_nodes(vec![node.node.id.clone()]),
+                );
+            }
             NodeSpec::Exit(cfg) if guru_worker_config::Remote::parse(&cfg.destination).is_err() => {
                 out.push(
                     TopologyProblem::error(
