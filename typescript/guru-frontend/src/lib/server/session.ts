@@ -7,12 +7,14 @@ export const SESSION_COOKIE = 'guru_session';
 const MAX_AGE = 60 * 60 * 24 * 7;
 
 export function setSessionCookie(sessionId: string): void {
-	const { cookies, url } = getRequestEvent();
-	cookies.set(SESSION_COOKIE, sessionId, {
+	// `secure` is deliberately left to SvelteKit's default (on everywhere except
+	// http://localhost): behind a TLS-terminating proxy the app itself sees
+	// plain http, so deriving it from `url.protocol` would ship the session id
+	// — a full bearer credential for the control plane — without `Secure`.
+	getRequestEvent().cookies.set(SESSION_COOKIE, sessionId, {
 		path: '/',
 		httpOnly: true,
 		sameSite: 'lax',
-		secure: url.protocol === 'https:',
 		maxAge: MAX_AGE
 	});
 }

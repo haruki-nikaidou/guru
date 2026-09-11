@@ -16,7 +16,16 @@ export async function callGrpc<T>(fn: () => Promise<T>): Promise<T> {
 		if (err instanceof ClientError) {
 			switch (err.code) {
 				case Status.UNAUTHENTICATED:
-					clearSessionCookie();
+					// Remote `query` functions run with cookie writes disabled, so this
+					// is best-effort: the redirect is what matters. A stale cookie is
+					// harmless — every protected path re-validates against the control
+					// plane, and the `(home)` layout load (where writes are allowed)
+					// clears it on the next visit.
+					try {
+						clearSessionCookie();
+					} catch {
+						/* SvelteKit forbids cookie mutation in a remote query. */
+					}
 					throw redirect(303, '/auth');
 				case Status.PERMISSION_DENIED:
 					throw error(403, { message: 'Forbidden', code: 'forbidden' });
