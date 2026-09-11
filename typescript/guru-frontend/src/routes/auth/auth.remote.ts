@@ -24,7 +24,7 @@ const loginSchema = v.object({
 });
 
 export const login = form(loginSchema, async ({ email, password, next }) => {
-	const { request } = getRequestEvent();
+	const { request, url } = getRequestEvent();
 	const userAgent = request.headers.get('user-agent') ?? '';
 
 	// Login is the only unauthenticated RPC: it carries no session metadata.
@@ -37,8 +37,24 @@ export const login = form(loginSchema, async ({ email, password, next }) => {
 	}
 
 	setSessionCookie(reply.sessionId);
-	redirect(303, next.startsWith('/') && !next.startsWith('//') ? next : '/');
+	redirect(303, samePathOrRoot(next, url.origin));
 });
+
+/**
+ * Post-login target, restricted to this origin. A `startsWith('/')` check is
+ * not enough: the URL parser normalises backslashes, so `/\evil.com` resolves
+ * to a protocol-relative external origin.
+ */
+function samePathOrRoot(next: string, origin: string): string {
+	try {
+		const target = new URL(next, origin);
+		if (target.origin !== origin) return '/';
+		return `${target.pathname}${target.search}`;
+	} catch {
+		// Unparseable target — treat it as absent rather than failing the login.
+		return '/';
+	}
+}
 
 export const logout = command(async () => {
 	const sessionId = getRequestEvent().cookies.get(SESSION_COOKIE);
