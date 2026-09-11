@@ -18,7 +18,9 @@ let deleteOpen = $state(false);
 
 <Card.Root>
 	<Card.Header>
-		<Card.Title>{canvas.name}</Card.Title>
+		<Card.Title>
+			<a href="/canvas/{canvas.id}" class="hover:underline">{canvas.name}</a>
+		</Card.Title>
 		<Card.Description>{canvas.description || m.canvas_no_description()}</Card.Description>
 		{#if editable}
 			<Card.Action>

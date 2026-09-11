@@ -33,6 +33,20 @@ export function issueMessage(code: string): string {
 			return m.issue_role_invalid();
 		case 'id_required':
 			return m.issue_id_required();
+		case 'node_name_required':
+			return m.issue_node_name_required();
+		case 'node_name_too_long':
+			return m.issue_node_name_too_long();
+		case 'node_comment_too_long':
+			return m.issue_node_comment_too_long();
+		case 'port_out_of_range':
+			return m.issue_port_out_of_range();
+		case 'member_count_out_of_range':
+			return m.issue_member_count_out_of_range();
+		case 'ip_required':
+			return m.issue_ip_required();
+		case 'log_level_required':
+			return m.issue_log_level_required();
 		default:
 			return code;
 	}

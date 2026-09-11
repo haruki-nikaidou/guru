@@ -204,6 +204,25 @@ fn an_exit_destination_must_be_host_port() {
     assert_eq!(errors(&problems), vec![ProblemKind::ExitDestinationInvalid]);
 }
 
+/// An exit an operator has not filled in yet stays storable: it is the mid-edit
+/// case this checker documents, and derivation refuses the pod behind it anyway.
+#[test]
+fn an_unset_exit_destination_is_a_warning_not_an_error() {
+    let mut b = Builder::new("prod");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+    b.node("pod", pod(&ip, 443), pod_ports());
+    b.node("entry", entry(None), entry_ports());
+    b.node("exit", exit(""), exit_ports());
+    b.connect("pod-listen", "entry-listen");
+    b.connect("exit-destination", "pod-destination");
+    let topology = b.build();
+    let problems = analyze(&topology);
+    assert_eq!(errors(&problems), Vec::<ProblemKind>::new());
+    assert!(warnings(&problems).contains(&ProblemKind::ExitDestinationInvalid));
+    ensure_valid(&topology).expect("a half-drawn exit must remain storable");
+}
+
 #[test]
 fn two_pods_may_not_share_a_listen_address() {
     let mut b = Builder::new("prod");
