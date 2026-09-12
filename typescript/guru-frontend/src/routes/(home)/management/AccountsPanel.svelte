@@ -94,7 +94,7 @@ async function confirmDelete(row: AccountRow) {
 								<Tooltip.Root>
 									<Tooltip.Trigger>
 										{#snippet child({ props })}
-											<span {...props}>
+											<span {...props} class="inline-block">
 												<Select.Root
 													type="single"
 													value={row.role}
