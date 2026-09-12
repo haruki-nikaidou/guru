@@ -1,6 +1,6 @@
 import { ProblemKind, ProblemSeverity } from 'app-protobuf/orchestration/orchestration';
 import * as v from 'valibot';
-import type { CanvasProblem, CanvasSummary } from '#lib/dto/canvas.js';
+import type { CanvasOption, CanvasProblem, CanvasSummary } from '#lib/dto/canvas.js';
 import { callGrpc } from '#lib/server/errors.js';
 import { orchestrationClient } from '#lib/server/grpc.js';
 import { requireSessionId, sessionMetadata } from '#lib/server/session.js';
@@ -34,6 +34,19 @@ function toProblem(severity: ProblemSeverity, kind: ProblemKind, message: string
 		message
 	};
 }
+
+/**
+ * Names only: what the editor's canvas switcher and settings page need. Kept
+ * apart from `listCanvases` so opening a canvas does not pay for the per-canvas
+ * detail/validate fan-out behind the dashboard cards.
+ */
+export const listCanvasOptions = query(async (): Promise<CanvasOption[]> => {
+	const metadata = sessionMetadata(requireSessionId());
+	const { canvases } = await callGrpc(() => orchestrationClient().listCanvases({}, { metadata }));
+	return canvases
+		.map(canvas => ({ id: canvas.id, name: canvas.name, description: canvas.description }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+});
 
 export const listCanvases = query(async (): Promise<CanvasSummary[]> => {
 	const metadata = sessionMetadata(requireSessionId());
@@ -87,7 +100,7 @@ export const createCanvas = form(
 	async ({ name, description }) => {
 		const metadata = sessionMetadata(requireSessionId());
 		await callGrpc(() => orchestrationClient().createCanvas({ name, description }, { metadata }));
-		await listCanvases().refresh();
+		await Promise.all([listCanvases().refresh(), listCanvasOptions().refresh()]);
 		return { ok: true as const };
 	}
 );
@@ -100,7 +113,7 @@ export const updateCanvas = form(
 		await callGrpc(() =>
 			orchestrationClient().updateCanvas({ canvasId, name, description }, { metadata })
 		);
-		await listCanvases().refresh();
+		await Promise.all([listCanvases().refresh(), listCanvasOptions().refresh()]);
 		return { ok: true as const };
 	}
 );
@@ -108,6 +121,6 @@ export const updateCanvas = form(
 export const deleteCanvas = command(v.object({ canvasId: idSchema }), async ({ canvasId }) => {
 	const metadata = sessionMetadata(requireSessionId());
 	await callGrpc(() => orchestrationClient().deleteCanvas({ canvasId }, { metadata }));
-	await listCanvases().refresh();
+	await Promise.all([listCanvases().refresh(), listCanvasOptions().refresh()]);
 	return { ok: true as const };
 });

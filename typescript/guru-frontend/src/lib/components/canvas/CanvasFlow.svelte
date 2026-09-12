@@ -41,7 +41,7 @@ import {
 	type FlowNode,
 	type ForceTarget,
 	type PortIndexEntry,
-	type SheetTarget,
+	type PanelTarget,
 	type Tombstones
 } from '#lib/components/canvas/graph.js';
 import EntryNode from '#lib/components/canvas/nodes/EntryNode.svelte';
@@ -49,12 +49,13 @@ import ExitNode from '#lib/components/canvas/nodes/ExitNode.svelte';
 import LoadBalanceNode from '#lib/components/canvas/nodes/LoadBalanceNode.svelte';
 import RelayNode from '#lib/components/canvas/nodes/RelayNode.svelte';
 import ServerNode from '#lib/components/canvas/nodes/ServerNode.svelte';
-import ForceDeleteDialog from '#lib/components/canvas/sheets/ForceDeleteDialog.svelte';
-import NodeSheet from '#lib/components/canvas/sheets/NodeSheet.svelte';
+import ForceDeleteDialog from '#lib/components/canvas/panels/ForceDeleteDialog.svelte';
+import NodePanel from '#lib/components/canvas/panels/NodePanel.svelte';
 import { Badge } from '#lib/components/ui/badge/index.js';
 import { Button } from '#lib/components/ui/button/index.js';
 import * as Card from '#lib/components/ui/card/index.js';
 import * as Empty from '#lib/components/ui/empty/index.js';
+import * as Resizable from '#lib/components/ui/resizable/index.js';
 import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 import { errorMessage } from '#lib/i18n/codes.js';
 import { m } from '#lib/paraglide/messages.js';
@@ -67,7 +68,7 @@ const graph = $derived(getCanvasGraph({ canvasId }));
 let nodes = $state.raw<FlowNode[]>([]);
 let edges = $state.raw<Edge[]>([]);
 let portIndex = $state.raw(new Map<string, PortIndexEntry>());
-let sheetTarget = $state<SheetTarget | null>(null);
+let panelTarget = $state<PanelTarget | null>(null);
 let forceTargets = $state<ForceTarget[]>([]);
 let problemsOpen = $state(false);
 let flowEl = $state<HTMLDivElement | null>(null);
@@ -189,6 +190,25 @@ async function persistMove(dragged: FlowNode[]) {
 	}
 }
 
+const ARROW_KEYS: Record<string, true> = {
+	ArrowUp: true,
+	ArrowDown: true,
+	ArrowLeft: true,
+	ArrowRight: true
+};
+
+/**
+ * Svelte Flow nudges the selection on arrow keys but never fires a drag stop, so
+ * the release is what persists the new positions. Only key events aimed at the
+ * flow count: the node panel's inputs handle their own arrows.
+ */
+function nudgeStop(event: KeyboardEvent) {
+	if (!editable || !ARROW_KEYS[event.key]) return;
+	if (!(event.target instanceof Node) || !flowEl?.contains(event.target)) return;
+	const selected = nodes.filter(node => node.selected);
+	if (selected.length > 0) persistMove(selected);
+}
+
 const isValidConnection = (connection: Edge | Connection): boolean => {
 	const current = graph.current;
 	return current ? canConnect(connection, portIndex, current, edges) : false;
@@ -289,155 +309,168 @@ function openProblem(nodeIds: string[]) {
 	const located = buildBackendIndex(current).get(first);
 	if (!located) return;
 	updateNode(located.flowId, { selected: true });
-	sheetTarget = located.target;
+	panelTarget = located.target;
 }
 </script>
 
-<div class="relative h-full w-full" bind:this={flowEl}>
-	<svelte:boundary>
-		<!-- Only the first load has nothing to show: a refresh keeps the flow mounted,
-		     otherwise remounting it would re-run `fitView` and reset the viewport. -->
-		{#if graph.current === undefined}
-			<Skeleton class="h-full w-full" />
-		{:else}
-			{@const current = graph.current}
-			<SvelteFlow
-				bind:nodes
-				bind:edges
-				{nodeTypes}
-				fitView
-				minZoom={0.2}
-				colorMode={mode.current ?? 'system'}
-				nodesDraggable={editable}
-				nodesConnectable={editable}
-				{isValidConnection}
-				onconnect={connect}
-				onbeforedelete={beforeDelete}
-				onnodeclick={({ node }) => (sheetTarget = parseFlowNodeId(node.id))}
-				onnodedragstop={({ nodes: dragged }) => persistMove(dragged)}
-				deleteKey={editable ? 'Delete' : null}
-			>
-				<Background />
-				<!-- Bottom-left belongs to the problems panel. -->
-				<Controls position="top-right" />
-				<MiniMap />
+<svelte:window onkeyup={nudgeStop} />
 
-				{#if editable}
-					<Panel position="top-left">
-						<div class="flex flex-wrap gap-2">
-							<Button size="sm" variant="secondary" onclick={addServer}>
-								<PlusIcon />
-								{m.editor_add_server()}
-							</Button>
-							<Button
-								size="sm"
-								variant="secondary"
-								onclick={() => addNode('entry', m.editor_add_entry())}
-							>
-								<PlusIcon />
-								{m.editor_add_entry()}
-							</Button>
-							<Button
-								size="sm"
-								variant="secondary"
-								onclick={() => addNode('relay', m.editor_add_relay())}
-							>
-								<PlusIcon />
-								{m.editor_add_relay()}
-							</Button>
-							<Button
-								size="sm"
-								variant="secondary"
-								onclick={() => addNode('exit', m.editor_add_exit())}
-							>
-								<PlusIcon />
-								{m.editor_add_exit()}
-							</Button>
-							<Button
-								size="sm"
-								variant="secondary"
-								onclick={() => addNode('load_balance_distribute', m.editor_add_lb_distribute())}
-							>
-								<PlusIcon />
-								{m.editor_add_lb_distribute()}
-							</Button>
-							<Button
-								size="sm"
-								variant="secondary"
-								onclick={() => addNode('load_balance_aggregate', m.editor_add_lb_aggregate())}
-							>
-								<PlusIcon />
-								{m.editor_add_lb_aggregate()}
-							</Button>
-						</div>
-					</Panel>
-				{/if}
+<svelte:boundary>
+	<!-- Only the first load has nothing to show: a refresh keeps the flow mounted,
+	     otherwise remounting it would re-run `fitView` and reset the viewport. -->
+	{#if graph.current === undefined}
+		<Skeleton class="h-full w-full" />
+	{:else}
+		{@const current = graph.current}
+		<Resizable.PaneGroup direction="horizontal">
+			<Resizable.Pane defaultSize={70} minSize={40} order={1}>
+				<div class="relative h-full w-full" bind:this={flowEl}>
+					<SvelteFlow
+						bind:nodes
+						bind:edges
+						{nodeTypes}
+						fitView
+						minZoom={0.2}
+						colorMode={mode.current ?? 'system'}
+						nodesDraggable={editable}
+						nodesConnectable={editable}
+						{isValidConnection}
+						onconnect={connect}
+						onbeforedelete={beforeDelete}
+						onnodeclick={({ node }) => (panelTarget = parseFlowNodeId(node.id))}
+						onnodedragstop={({ nodes: dragged }) => persistMove(dragged)}
+						deleteKey={editable ? 'Delete' : null}
+					>
+						<Background />
+						<!-- Bottom-left belongs to the problems panel. -->
+						<Controls position="top-right" />
+						<MiniMap />
 
-				<Panel position="bottom-left">
-					{#if current}
-						{@const problems = current.problems}
-						{#if problems.length === 0}
-							<Badge variant="secondary">{m.canvas_health_ok()}</Badge>
-						{:else if problems.length > 3 && !problemsOpen}
-							<Button size="sm" variant="outline" onclick={() => (problemsOpen = true)}>
-								{m.editor_problems({ count: problems.length })}
-							</Button>
-						{:else}
-							<Card.Root class="max-w-md gap-2 py-3">
-								<Card.Content class="grid gap-2 px-3">
-									{#if current.orphanPods.length > 0}
-										<p class="text-xs text-muted-foreground">
-											{m.editor_pod_orphan({ count: current.orphanPods.length })}
-										</p>
-									{/if}
-									{#each problems as problem (problem.message)}
-										<button
-											type="button"
-											class="flex items-start gap-2 text-start text-xs hover:underline"
-											onclick={() => openProblem(problem.nodeIds)}
-										>
-											<Badge
-												variant={problem.severity === 'error' ? 'destructive' : 'outline'}
-											>
-												{problem.severity === 'error'
-													? m.editor_severity_error()
-													: m.editor_severity_warning()}
-											</Badge>
-											<span>{problem.message}</span>
-										</button>
-									{/each}
-								</Card.Content>
-							</Card.Root>
+						{#if editable}
+							<Panel position="top-left">
+								<div class="flex flex-wrap gap-2">
+									<Button size="sm" variant="secondary" onclick={addServer}>
+										<PlusIcon />
+										{m.editor_add_server()}
+									</Button>
+									<Button
+										size="sm"
+										variant="secondary"
+										onclick={() => addNode('entry', m.editor_add_entry())}
+									>
+										<PlusIcon />
+										{m.editor_add_entry()}
+									</Button>
+									<Button
+										size="sm"
+										variant="secondary"
+										onclick={() => addNode('relay', m.editor_add_relay())}
+									>
+										<PlusIcon />
+										{m.editor_add_relay()}
+									</Button>
+									<Button
+										size="sm"
+										variant="secondary"
+										onclick={() => addNode('exit', m.editor_add_exit())}
+									>
+										<PlusIcon />
+										{m.editor_add_exit()}
+									</Button>
+									<Button
+										size="sm"
+										variant="secondary"
+										onclick={() => addNode('load_balance_distribute', m.editor_add_lb_distribute())}
+									>
+										<PlusIcon />
+										{m.editor_add_lb_distribute()}
+									</Button>
+									<Button
+										size="sm"
+										variant="secondary"
+										onclick={() => addNode('load_balance_aggregate', m.editor_add_lb_aggregate())}
+									>
+										<PlusIcon />
+										{m.editor_add_lb_aggregate()}
+									</Button>
+								</div>
+							</Panel>
 						{/if}
+
+						<Panel position="bottom-left">
+							{#if current}
+								{@const problems = current.problems}
+								{#if problems.length === 0}
+									<Badge variant="secondary">{m.canvas_health_ok()}</Badge>
+								{:else if problems.length > 3 && !problemsOpen}
+									<Button size="sm" variant="outline" onclick={() => (problemsOpen = true)}>
+										{m.editor_problems({ count: problems.length })}
+									</Button>
+								{:else}
+									<Card.Root class="max-w-md gap-2 py-3">
+										<Card.Content class="grid gap-2 px-3">
+											{#if current.orphanPods.length > 0}
+												<p class="text-xs text-muted-foreground">
+													{m.editor_pod_orphan({ count: current.orphanPods.length })}
+												</p>
+											{/if}
+											{#each problems as problem (problem.message)}
+												<button
+													type="button"
+													class="flex items-start gap-2 text-start text-xs hover:underline"
+													onclick={() => openProblem(problem.nodeIds)}
+												>
+													<Badge
+														variant={problem.severity === 'error' ? 'destructive' : 'outline'}
+													>
+														{problem.severity === 'error'
+															? m.editor_severity_error()
+															: m.editor_severity_warning()}
+													</Badge>
+													<span>{problem.message}</span>
+												</button>
+											{/each}
+										</Card.Content>
+									</Card.Root>
+								{/if}
+							{/if}
+						</Panel>
+					</SvelteFlow>
+
+					{#if current && current.servers.length === 0 && current.nodes.length === 0}
+						<div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+							<Empty.Root>
+								<Empty.Header>
+									<Empty.Title>{m.editor_empty_title()}</Empty.Title>
+									<Empty.Description>{m.editor_empty_description()}</Empty.Description>
+								</Empty.Header>
+							</Empty.Root>
+						</div>
 					{/if}
-				</Panel>
-			</SvelteFlow>
-
-			{#if current && current.servers.length === 0 && current.nodes.length === 0}
-				<div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-					<Empty.Root>
-						<Empty.Header>
-							<Empty.Title>{m.editor_empty_title()}</Empty.Title>
-							<Empty.Description>{m.editor_empty_description()}</Empty.Description>
-						</Empty.Header>
-					</Empty.Root>
 				</div>
-			{/if}
+			</Resizable.Pane>
 
-			<NodeSheet bind:target={sheetTarget} {canvasId} {editable} graph={current} />
-			{#if admin}
-				<ForceDeleteDialog bind:targets={forceTargets} {canvasId} />
+			<!-- Conditional panes need `order` so the flow stays first when this mounts. -->
+			{#if panelTarget}
+				<Resizable.Handle withHandle />
+				<Resizable.Pane defaultSize={30} minSize={20} maxSize={50} order={2}>
+					<NodePanel bind:target={panelTarget} {canvasId} {editable} graph={current} />
+				</Resizable.Pane>
 			{/if}
+		</Resizable.PaneGroup>
+
+		{#if admin}
+			<ForceDeleteDialog bind:targets={forceTargets} {canvasId} />
 		{/if}
+	{/if}
 
-		{#snippet failed(error)}
-			{@const body = (error as { body?: App.Error }).body}
-			<Empty.Root>
-				<Empty.Header>
-					<Empty.Title>{m.error_title()}</Empty.Title>
-					<Empty.Description>{errorMessage(body?.code, body?.message ?? '')}</Empty.Description>
-				</Empty.Header>
-			</Empty.Root>
-		{/snippet}
-	</svelte:boundary>
-</div>
+	{#snippet failed(error)}
+		{@const body = (error as { body?: App.Error }).body}
+		<Empty.Root>
+			<Empty.Header>
+				<Empty.Title>{m.error_title()}</Empty.Title>
+				<Empty.Description>{errorMessage(body?.code, body?.message ?? '')}</Empty.Description>
+			</Empty.Header>
+		</Empty.Root>
+	{/snippet}
+</svelte:boundary>

@@ -5,12 +5,23 @@ import { buttonVariants } from '#lib/components/ui/button/index.js';
 import * as Field from '#lib/components/ui/field/index.js';
 import { Input } from '#lib/components/ui/input/index.js';
 import { Spinner } from '#lib/components/ui/spinner/index.js';
-import type { CanvasSummary } from '#lib/dto/canvas.js';
+import type { CanvasOption, CanvasSummary } from '#lib/dto/canvas.js';
 import { errorMessage } from '#lib/i18n/codes.js';
 import { m } from '#lib/paraglide/messages.js';
 import { deleteCanvas } from './canvases.remote.js';
 
-let { canvas, open = $bindable(false) }: { canvas: CanvasSummary; open?: boolean } = $props();
+let {
+	canvas,
+	stats = null,
+	open = $bindable(false),
+	ondeleted
+}: {
+	canvas: CanvasOption;
+	/** Shown when the caller has them; the settings page does not. */
+	stats?: CanvasSummary['stats'];
+	open?: boolean;
+	ondeleted?: () => void;
+} = $props();
 
 let confirmName = $state('');
 let pending = $state(false);
@@ -25,6 +36,7 @@ async function confirm() {
 		await deleteCanvas({ canvasId: canvas.id });
 		open = false;
 		toast.success(m.canvas_deleted());
+		ondeleted?.();
 	} catch (err) {
 		const body = (err as { body?: App.Error }).body;
 		toast.error(errorMessage(body?.code, body?.message ?? ''));
@@ -43,11 +55,11 @@ async function confirm() {
 			</AlertDialog.Description>
 		</AlertDialog.Header>
 
-		{#if canvas.stats}
+		{#if stats}
 			<p class="text-sm text-muted-foreground">
-				{m.canvas_servers_count({ count: canvas.stats.servers })} ·
-				{m.canvas_nodes_count({ count: canvas.stats.nodes })} ·
-				{m.canvas_edges_count({ count: canvas.stats.edges })}
+				{m.canvas_servers_count({ count: stats.servers })} ·
+				{m.canvas_nodes_count({ count: stats.nodes })} ·
+				{m.canvas_edges_count({ count: stats.edges })}
 			</p>
 		{/if}
 
