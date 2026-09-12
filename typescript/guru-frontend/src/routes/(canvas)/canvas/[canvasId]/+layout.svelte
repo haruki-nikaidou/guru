@@ -23,6 +23,8 @@ function switchCanvas(id: string) {
 }
 </script>
 
+<svelte:head><title>{current?.name ?? m.nav_brand()}</title></svelte:head>
+
 <!-- Bounded to the viewport so the editor fills it; other pages scroll inside `main`. -->
 <Sidebar.Provider class="h-svh">
 	<CanvasSidebar identity={data.identity} {canvasId} />
