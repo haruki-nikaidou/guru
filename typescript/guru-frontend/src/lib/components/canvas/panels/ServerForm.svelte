@@ -3,6 +3,7 @@ import PlusIcon from '@lucide/svelte/icons/plus';
 import Trash2Icon from '@lucide/svelte/icons/trash-2';
 import { untrack } from 'svelte';
 import { toast } from 'svelte-sonner';
+import CopyButton from '#lib/components/CopyButton.svelte';
 import {
 	addServerIpAddress,
 	createPodNode,
@@ -132,6 +133,17 @@ const addPod = () =>
 		newPodName = '';
 	}, m.editor_saved());
 </script>
+
+<div class="mb-4 flex items-center gap-1 text-xs text-muted-foreground">
+	<span>{m.editor_server_id()}</span>
+	<span class="truncate font-mono">{server.id}</span>
+	<CopyButton
+		value={server.id}
+		label={m.editor_server_id_copy()}
+		size="icon-xs"
+		class="shrink-0"
+	/>
+</div>
 
 <Field.FieldGroup>
 	<Field.Field>
