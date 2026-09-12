@@ -4,4 +4,4 @@
  * the single place that bridges the two, so no component carries a deep relative
  * path.
  */
-export * from '../../../routes/(home)/canvas/[canvasId]/topology.remote.js';
+export * from '../../../routes/(canvas)/canvas/[canvasId]/topology.remote.js';

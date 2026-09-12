@@ -38,8 +38,8 @@ export function parseFlowNodeId(flowId: string): { kind: 'server' | 'node'; id: 
 	return { kind: prefix === 'server' ? 'server' : 'node', id: flowId.slice(separator + 1) };
 }
 
-/** What the node sheet is editing, in backend id space. */
-export type SheetTarget = { kind: 'server' | 'node'; id: string };
+/** What the node panel is editing, in backend id space. */
+export type PanelTarget = { kind: 'server' | 'node'; id: string };
 
 /** A deletion the control plane refused, offered to admins as a force retry. */
 export type ForceTarget = {
@@ -311,16 +311,16 @@ export function portLabel(key: string): string {
 
 /**
  * Backend id (server, pod or standalone node) → the flow node that draws it and
- * the sheet target that edits it. A pod resolves to its server.
+ * the panel target that edits it. A pod resolves to its server.
  */
 export function buildBackendIndex(
 	graph: CanvasGraph
-): Map<string, { flowId: string; target: SheetTarget }> {
-	const index = new Map<string, { flowId: string; target: SheetTarget }>();
+): Map<string, { flowId: string; target: PanelTarget }> {
+	const index = new Map<string, { flowId: string; target: PanelTarget }>();
 	for (const server of graph.servers) {
 		const entry = {
 			flowId: flowNodeId('server', server.id),
-			target: { kind: 'server', id: server.id } as SheetTarget
+			target: { kind: 'server', id: server.id } as PanelTarget
 		};
 		index.set(server.id, entry);
 		for (const pod of server.pods) index.set(pod.id, entry);

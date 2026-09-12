@@ -91,5 +91,5 @@ let deleteOpen = $state(false);
 
 {#if editable}
 	<CanvasFormDialog mode="edit" {canvas} bind:open={editOpen} />
-	<DeleteCanvasDialog {canvas} bind:open={deleteOpen} />
+	<DeleteCanvasDialog {canvas} stats={canvas.stats} bind:open={deleteOpen} />
 {/if}
