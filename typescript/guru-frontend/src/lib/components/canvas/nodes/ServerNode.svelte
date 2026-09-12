@@ -9,7 +9,7 @@ import PortHandle from './PortHandle.svelte';
 
 // A server renders as one node containing all of its pods; pods are never placed
 // on the canvas themselves.
-let { data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'server' }> } = $props();
+let { id, data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'server' }> } = $props();
 
 const ipv6 = $derived(
 	data.server.ipv6Resolve === 'required'
@@ -26,6 +26,7 @@ const addressOf = (ipRecordId: string): string =>
 </script>
 
 <NodeShell
+	{id}
 	title={data.server.name}
 	kindLabel={m.editor_kind_server()}
 	comment={data.server.comment}
@@ -40,31 +41,29 @@ const addressOf = (ipRecordId: string): string =>
 			<span class="text-xs text-muted-foreground">{data.server.icon}</span>
 		{/if}
 	{/snippet}
-	{#snippet children()}
-		<p class="px-3 pt-1 text-xs text-muted-foreground">
-			{data.server.logLevel} · {ipv6} · {data.server.ips.length}
-			{m.editor_server_ips()}
-		</p>
-		<p class="px-3 text-xs text-muted-foreground">
-			{m.editor_server_last_seen()}: {formatTimestamp(data.server.lastSeenAt)}
-		</p>
+	<p class="px-3 pt-1 text-xs text-muted-foreground">
+		{data.server.logLevel} · {ipv6} · {data.server.ips.length}
+		{m.editor_server_ips()}
+	</p>
+	<p class="px-3 text-xs text-muted-foreground">
+		{m.editor_server_last_seen()}: {formatTimestamp(data.server.lastSeenAt)}
+	</p>
 
-		{#if data.server.pods.length === 0}
-			<p class="px-3 py-2 text-xs text-muted-foreground">{m.editor_pod_none()}</p>
-		{:else}
-			{#each data.server.pods as pod (pod.id)}
-				<div class="mt-2 border-t pt-1">
-					<p class="truncate px-3 text-xs font-medium">
-						{pod.name}
-						<span class="font-mono text-muted-foreground">
-							{addressOf(pod.ipRecordId)}:{pod.port}
-						</span>
-					</p>
-					{#each pod.ports as port (port.id)}
-						<PortHandle {port} label={portLabel(port.key)} />
-					{/each}
-				</div>
-			{/each}
-		{/if}
-	{/snippet}
+	{#if data.server.pods.length === 0}
+		<p class="px-3 py-2 text-xs text-muted-foreground">{m.editor_pod_none()}</p>
+	{:else}
+		{#each data.server.pods as pod (pod.id)}
+			<div class="mt-2 border-t pt-1">
+				<p class="truncate px-3 text-xs font-medium">
+					{pod.name}
+					<span class="font-mono text-muted-foreground">
+						{addressOf(pod.ipRecordId)}:{pod.port}
+					</span>
+				</p>
+				{#each pod.ports as port (port.id)}
+					<PortHandle {port} label={portLabel(port.key)} />
+				{/each}
+			</div>
+		{/each}
+	{/if}
 </NodeShell>
