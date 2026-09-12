@@ -58,7 +58,9 @@ import * as Empty from '#lib/components/ui/empty/index.js';
 import * as Resizable from '#lib/components/ui/resizable/index.js';
 import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 import { errorMessage } from '#lib/i18n/codes.js';
+import { suggestName } from '#lib/i18n/naming.js';
 import { m } from '#lib/paraglide/messages.js';
+import { getLocale } from '#lib/paraglide/runtime.js';
 
 let { canvasId, editable, admin }: { canvasId: string; editable: boolean; admin: boolean } =
 	$props();
@@ -138,22 +140,56 @@ function palettePosition(): { x: number; y: number } {
 	return { x: Math.round(point.x), y: Math.round(point.y) };
 }
 
+/**
+ * Every name visible on the canvas, so a fresh default never duplicates one.
+ * Pods are included: they render inside their server and carry a name of their
+ * own, so a node named after one would be just as confusing.
+ */
+function usedNames(): ReadonlySet<string> {
+	const current = graph.current;
+	if (!current) return new Set();
+	const names = new Set<string>();
+	for (const server of current.servers) {
+		names.add(server.name);
+		for (const pod of server.pods) names.add(pod.name);
+	}
+	for (const node of current.nodes) names.add(node.name);
+	for (const pod of current.orphanPods) names.add(pod.name);
+	return names;
+}
+
 async function addServer() {
 	const { x, y } = palettePosition();
 	try {
-		await createServerNode({ canvasId, name: m.editor_add_server(), x, y });
+		await createServerNode({
+			canvasId,
+			name: suggestName(m.editor_add_server(), getLocale(), usedNames()),
+			x,
+			y
+		});
 	} catch (err) {
 		reportError(err);
 	}
 }
 
+/**
+ * The default name is the localized type label plus a random word pair, drawn
+ * clear of the names already on the canvas.
+ */
 async function addNode(
 	kind: 'entry' | 'relay' | 'exit' | 'load_balance_distribute' | 'load_balance_aggregate',
-	name: string
+	typeLabel: string
 ) {
 	const { x, y } = palettePosition();
 	try {
-		await createStandaloneNode({ canvasId, kind, name, x, y, memberCount: 2 });
+		await createStandaloneNode({
+			canvasId,
+			kind,
+			name: suggestName(typeLabel, getLocale(), usedNames()),
+			x,
+			y,
+			memberCount: 2
+		});
 	} catch (err) {
 		reportError(err);
 	}
