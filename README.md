@@ -37,10 +37,10 @@ revision drops traffic mid-rollout.
 
 ## Images
 
-| Image | Dockerfile | Base | Tagged |
-|---|---|---|---|
-| `ghcr.io/<owner>/guru-master` | `master.Dockerfile` | `distroless/cc-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `master-v*` / `v*` |
-| `ghcr.io/<owner>/guru-frontend` | `frontend.Dockerfile` | `distroless/nodejs24-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `frontend-v*` / `v*` |
+| Image | Base | Tagged |
+|---|---|---|
+| `ghcr.io/haruki-nikaidou/guru-master` | `distroless/cc-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `master-v*` / `v*` |
+| `ghcr.io/haruki-nikaidou/guru-frontend` | `distroless/nodejs24-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `frontend-v*` / `v*` |
 
 Every pushed tag builds both images and tags them with the tag name; the
 `master-v*` / `frontend-v*` / `v*` conventions additionally produce a bare
