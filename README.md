@@ -35,6 +35,30 @@ its `AckConfig` promotes `in_flight` → `applied`. Derivation is convergent: a
 server only switches destination once the target actually serves it, so no
 revision drops traffic mid-rollout.
 
+## Images
+
+| Image | Dockerfile | Base | Tagged |
+|---|---|---|---|
+| `ghcr.io/<owner>/guru-master` | `master.Dockerfile` | `distroless/cc-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `master-v*` / `v*` |
+| `ghcr.io/<owner>/guru-frontend` | `frontend.Dockerfile` | `distroless/nodejs24-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `frontend-v*` / `v*` |
+
+Every pushed tag builds both images and tags them with the tag name; the
+`master-v*` / `frontend-v*` / `v*` conventions additionally produce a bare
+`<version>` tag on the matching image.
+
+Both build from the repository root — the frontend needs the whole Bun workspace
+for the `app-protobuf` package:
+
+```sh
+docker build -f master.Dockerfile   -t guru-master   .
+docker build -f frontend.Dockerfile -t guru-frontend .
+```
+
+`guru-master` is configured entirely through the environment (`GURU_WORKER_MODE`
+selects the mode; `SURREALDB_NAMESPACE`, `SURREALDB_NAME` and `AMQP_URI` have no
+defaults). The frontend listens on `:3000` and reaches the control plane through
+`GURU_GRPC_URL`.
+
 ## Stack
 
 Rust 2024 on Tokio, [`wakuwaku`](https://crates.io/crates/wakuwaku) +

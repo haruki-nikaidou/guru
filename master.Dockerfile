@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+#
+# `bin/guru-master` — the control plane. One image, four run modes selected with
+# `GURU_WORKER_MODE` (dashboard_grpc | workers_grpc | consumer | cron).
+#
+# Build from the repository root:
+#   docker build -f master.Dockerfile -t guru-master .
+
+FROM rust:1.98 AS chef
+WORKDIR /usr/src/proxy-guru
+RUN cargo install cargo-chef --locked
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+# `lib/rpguru_sdk`'s build script compiles `proto/` with tonic-prost-build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=planner /usr/src/proxy-guru/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+COPY . .
+RUN cargo build --release -p guru-master && \
+    cp target/release/guru-master /guru-master
+
+# glibc-linked binary, so `cc` rather than `static`. Pinned to the same Debian
+# release as the `rust` builder above: a newer builder glibc would not resolve.
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
+COPY --from=builder /guru-master /usr/local/bin/guru-master
+
+# Required at run time, no sane default: SURREALDB_NAMESPACE, SURREALDB_NAME,
+# and AMQP_URI (every mode except `cron` talks to the broker).
+ENV GURU_WORKER_MODE="dashboard_grpc"
+ENV GURU_DASHBOARD_GRPC_ADDR="0.0.0.0:50051"
+ENV GURU_WORKERS_GRPC_ADDR="0.0.0.0:50052"
+ENV GURU_LOG_LEVEL="info"
+
+# dashboard_grpc, workers_grpc.
+EXPOSE 50051 50052
+
+ENTRYPOINT ["/usr/local/bin/guru-master"]
