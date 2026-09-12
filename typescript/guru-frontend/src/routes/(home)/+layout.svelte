@@ -1,10 +1,13 @@
 <script lang="ts">
 import AppSidebar from '#lib/components/nav/app-sidebar.svelte';
 import * as Sidebar from '#lib/components/ui/sidebar/index.js';
+import { m } from '#lib/paraglide/messages.js';
 import type { LayoutProps } from './$types.js';
 
 let { data, children }: LayoutProps = $props();
 </script>
+
+<svelte:head><title>{m.nav_brand()}</title></svelte:head>
 
 <Sidebar.Provider>
 	<AppSidebar identity={data.identity} />
