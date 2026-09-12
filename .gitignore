@@ -26,3 +26,5 @@ node_modules/
 *.tsbuildinfo
 
 omp-session*
+
+.env
