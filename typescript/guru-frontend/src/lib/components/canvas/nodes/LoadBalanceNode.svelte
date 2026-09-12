@@ -9,7 +9,7 @@ import PortHandle from './PortHandle.svelte';
 
 // Both load-balance variants render here: the backend refuses to change a node's
 // spec kind, so the variant is fixed at creation and only ever displayed.
-let { data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'load_balance' }> } = $props();
+let { id, data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'load_balance' }> } = $props();
 
 const distribute = $derived(data.node.mode === 'distribute');
 const balanceMode = $derived(
@@ -24,6 +24,7 @@ const balanceMode = $derived(
 </script>
 
 <NodeShell
+	{id}
 	title={data.node.name}
 	kindLabel={distribute ? m.editor_kind_lb_distribute() : m.editor_kind_lb_aggregate()}
 	comment={data.node.comment}
@@ -37,14 +38,12 @@ const balanceMode = $derived(
 			<MergeIcon class="size-4 shrink-0" />
 		{/if}
 	{/snippet}
-	{#snippet children()}
-		<p class="px-3 pt-1 text-xs text-muted-foreground">
-			{distribute ? `${balanceMode} · ` : ''}{m.editor_member_count()}: {data.node.memberCount}
-		</p>
-		<div class="mt-1">
-			{#each data.node.ports as port (port.id)}
-				<PortHandle {port} label={portLabel(port.key)} />
-			{/each}
-		</div>
-	{/snippet}
+	<p class="px-3 pt-1 text-xs text-muted-foreground">
+		{distribute ? `${balanceMode} · ` : ''}{m.editor_member_count()}: {data.node.memberCount}
+	</p>
+	<div class="mt-1">
+		{#each data.node.ports as port (port.id)}
+			<PortHandle {port} label={portLabel(port.key)} />
+		{/each}
+	</div>
 </NodeShell>

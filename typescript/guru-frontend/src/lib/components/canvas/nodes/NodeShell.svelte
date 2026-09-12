@@ -1,9 +1,11 @@
 <script lang="ts">
 import type { Snippet } from 'svelte';
+import { useFocusedNode } from '#lib/components/canvas/focus.svelte.js';
 import type { ProblemLevel } from '#lib/components/canvas/graph.js';
 
 // The card every node kind renders inside: header, optional comment, port rows.
 let {
+	id,
 	title,
 	kindLabel,
 	comment,
@@ -13,6 +15,8 @@ let {
 	icon,
 	children
 }: {
+	/** Flow node id, matched against the panel's target to draw the focus ring. */
+	id: string;
 	title: string;
 	kindLabel: string;
 	comment: string;
@@ -23,13 +27,24 @@ let {
 	icon: Snippet;
 	children: Snippet;
 } = $props();
+
+const focused = useFocusedNode();
+
+// Being the panel's edit target outranks the problem ring: the operator needs to
+// see which card the form on the right belongs to, warning or not.
+const outline = $derived(
+	focused.current === id
+		? 'border-ring ring-3 ring-ring/30'
+		: problem === 'error'
+			? 'ring-2 ring-destructive'
+			: problem === 'warning'
+				? 'ring-2 ring-amber-500'
+				: ''
+);
 </script>
 
 <div
-	class="{width} {background} rounded-lg border py-2 text-foreground shadow-sm"
-	class:ring-2={problem !== 'none'}
-	class:ring-destructive={problem === 'error'}
-	class:ring-amber-500={problem === 'warning'}
+	class="{width} {background} {outline} rounded-lg border py-2 text-foreground shadow-sm transition-[color,box-shadow]"
 >
 	<div class="flex items-center gap-2 px-3">
 		{@render icon()}

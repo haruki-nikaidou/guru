@@ -6,7 +6,7 @@ import { m } from '#lib/paraglide/messages.js';
 import NodeShell from './NodeShell.svelte';
 import PortHandle from './PortHandle.svelte';
 
-let { data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'relay' }> } = $props();
+let { id, data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'relay' }> } = $props();
 
 const protocol = $derived(
 	data.node.protocol === 'tcp_tls'
@@ -24,6 +24,7 @@ const override = $derived(
 </script>
 
 <NodeShell
+	{id}
 	title={data.node.name}
 	kindLabel={m.editor_kind_relay()}
 	comment={data.node.comment}
@@ -31,14 +32,12 @@ const override = $derived(
 	background="bg-canvas-relay"
 >
 	{#snippet icon()}<WaypointsIcon class="size-4 shrink-0" />{/snippet}
-	{#snippet children()}
-		<p class="px-3 pt-1 text-xs text-muted-foreground">
-			{protocol}{override ? ` · ${override}` : ''}
-		</p>
-		<div class="mt-1">
-			{#each data.node.ports as port (port.id)}
-				<PortHandle {port} label={portLabel(port.key)} />
-			{/each}
-		</div>
-	{/snippet}
+	<p class="px-3 pt-1 text-xs text-muted-foreground">
+		{protocol}{override ? ` · ${override}` : ''}
+	</p>
+	<div class="mt-1">
+		{#each data.node.ports as port (port.id)}
+			<PortHandle {port} label={portLabel(port.key)} />
+		{/each}
+	</div>
 </NodeShell>

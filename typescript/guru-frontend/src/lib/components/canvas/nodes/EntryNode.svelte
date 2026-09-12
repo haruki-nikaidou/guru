@@ -6,7 +6,7 @@ import { m } from '#lib/paraglide/messages.js';
 import NodeShell from './NodeShell.svelte';
 import PortHandle from './PortHandle.svelte';
 
-let { data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'entry' }> } = $props();
+let { id, data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'entry' }> } = $props();
 
 const proxy = $derived(
 	data.node.receiveProxyProtocol === 'v1'
@@ -18,6 +18,7 @@ const proxy = $derived(
 </script>
 
 <NodeShell
+	{id}
 	title={data.node.name}
 	kindLabel={m.editor_kind_entry()}
 	comment={data.node.comment}
@@ -25,14 +26,12 @@ const proxy = $derived(
 	background="bg-canvas-entry"
 >
 	{#snippet icon()}<LogInIcon class="size-4 shrink-0" />{/snippet}
-	{#snippet children()}
-		<p class="px-3 pt-1 text-xs text-muted-foreground">
-			{m.editor_receive_proxy()}: {proxy}
-		</p>
-		<div class="mt-1">
-			{#each data.node.ports as port (port.id)}
-				<PortHandle {port} label={portLabel(port.key)} />
-			{/each}
-		</div>
-	{/snippet}
+	<p class="px-3 pt-1 text-xs text-muted-foreground">
+		{m.editor_receive_proxy()}: {proxy}
+	</p>
+	<div class="mt-1">
+		{#each data.node.ports as port (port.id)}
+			<PortHandle {port} label={portLabel(port.key)} />
+		{/each}
+	</div>
 </NodeShell>

@@ -26,12 +26,14 @@ import {
 	moveNode,
 	moveServerNode
 } from '#lib/components/canvas/commands.js';
+import { setFocusedNode } from '#lib/components/canvas/focus.svelte.js';
 import {
 	buildBackendIndex,
 	buildFlowEdges,
 	buildFlowNodes,
 	buildPortIndex,
 	canConnect,
+	flowNodeId,
 	keepEdges,
 	keepNodes,
 	mergeTombstones,
@@ -95,6 +97,13 @@ const nodeTypes = {
 	exit: ExitNode,
 	loadBalance: LoadBalanceNode
 };
+
+// The node cards read this to ring the one the panel is editing.
+setFocusedNode({
+	get current() {
+		return panelTarget ? flowNodeId(panelTarget.kind, panelTarget.id) : null;
+	}
+});
 
 // The server owns the graph, but a refresh is merged into the local mirror
 // instead of replacing it: untouched nodes keep their object identity, so they
