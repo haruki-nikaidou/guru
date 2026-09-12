@@ -1,4 +1,4 @@
-import type { Edge, Node } from '@xyflow/svelte';
+import type { Connection, Edge, Node } from '@xyflow/svelte';
 import type {
 	CanvasGraph,
 	EntryNodeDto,
@@ -142,6 +142,52 @@ export function buildFlowEdges(graph: CanvasGraph): Edge[] {
 		});
 	}
 	return edges;
+}
+
+/**
+ * Port ids already carrying an edge; a port is allowed exactly one.
+ *
+ * Both sources are needed. `buildFlowEdges` drops any edge whose opposite port
+ * is off-canvas, so its surviving endpoint would otherwise look free; the graph
+ * edges keep it occupied. The flow edges in turn carry the optimistic edge Svelte
+ * Flow inserts before `onconnect`, which the graph has not been refreshed with
+ * yet, so a second drag right after the first is still refused.
+ */
+export function connectedPortIds(graph: CanvasGraph, flowEdges: Edge[]): Set<string> {
+	const used = new Set<string>();
+	for (const edge of graph.edges) {
+		used.add(edge.sourcePortId);
+		used.add(edge.targetPortId);
+	}
+	for (const edge of flowEdges) {
+		if (edge.sourceHandle) used.add(edge.sourceHandle);
+		if (edge.targetHandle) used.add(edge.targetHandle);
+	}
+	return used;
+}
+
+/**
+ * Mirrors `check_edges` in the control plane so a doomed drag never round-trips:
+ * both ports must be known, sit on different nodes, share a kind, run
+ * output → input, and still be free — a second edge on either endpoint is what
+ * the backend reports as `PortOversubscribed`.
+ */
+export function canConnect(
+	connection: Edge | Connection,
+	portIndex: Map<string, PortIndexEntry>,
+	graph: CanvasGraph,
+	flowEdges: Edge[]
+): boolean {
+	const sourceHandle = connection.sourceHandle ?? '';
+	const targetHandle = connection.targetHandle ?? '';
+	const source = portIndex.get(sourceHandle);
+	const target = portIndex.get(targetHandle);
+	if (!source || !target) return false;
+	if (connection.source === connection.target) return false;
+	if (source.kind !== target.kind) return false;
+	if (source.direction !== 'output' || target.direction !== 'input') return false;
+	const used = connectedPortIds(graph, flowEdges);
+	return !used.has(sourceHandle) && !used.has(targetHandle);
 }
 
 /**

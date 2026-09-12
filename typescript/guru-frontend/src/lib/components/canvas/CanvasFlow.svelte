@@ -31,6 +31,7 @@ import {
 	buildFlowEdges,
 	buildFlowNodes,
 	buildPortIndex,
+	canConnect,
 	parseFlowNodeId,
 	type FlowNode,
 	type ForceTarget,
@@ -165,16 +166,10 @@ async function persistMove(dragged: FlowNode[]) {
 	}
 }
 
-// Mirrors `check_edges` in the control plane so a doomed drag never round-trips.
-function isValidConnection(connection: Edge | Connection): boolean {
-	const source = portIndex.get(connection.sourceHandle ?? '');
-	const target = portIndex.get(connection.targetHandle ?? '');
-	if (!source || !target) return false;
-	if (connection.source === connection.target) return false;
-	return (
-		source.kind === target.kind && source.direction === 'output' && target.direction === 'input'
-	);
-}
+const isValidConnection = (connection: Edge | Connection): boolean => {
+	const current = graph.current;
+	return current ? canConnect(connection, portIndex, current, edges) : false;
+};
 
 async function connect(connection: Connection) {
 	try {
