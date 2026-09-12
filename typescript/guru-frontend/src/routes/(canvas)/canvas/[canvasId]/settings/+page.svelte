@@ -3,10 +3,12 @@ import { untrack } from 'svelte';
 import { toast } from 'svelte-sonner';
 import { goto } from '$app/navigation';
 import { page } from '$app/state';
+import CopyButton from '#lib/components/CopyButton.svelte';
 import { Button } from '#lib/components/ui/button/index.js';
 import * as Card from '#lib/components/ui/card/index.js';
 import * as Empty from '#lib/components/ui/empty/index.js';
 import * as Field from '#lib/components/ui/field/index.js';
+import * as InputGroup from '#lib/components/ui/input-group/index.js';
 import { Input } from '#lib/components/ui/input/index.js';
 import { Skeleton } from '#lib/components/ui/skeleton/index.js';
 import { Spinner } from '#lib/components/ui/spinner/index.js';
@@ -74,6 +76,16 @@ $effect(() => {
 					<input {...form.fields.canvasId.as('hidden', canvasId)} />
 					<Card.Content>
 						<Field.FieldGroup>
+							<Field.Field>
+								<Field.FieldLabel for="canvas-id">{m.canvas_id()}</Field.FieldLabel>
+								<InputGroup.Root>
+									<InputGroup.Input id="canvas-id" readonly value={canvas.id} class="font-mono" />
+									<InputGroup.Addon align="inline-end">
+										<CopyButton value={canvas.id} label={m.canvas_id_copy()} size="icon-sm" />
+									</InputGroup.Addon>
+								</InputGroup.Root>
+							</Field.Field>
+
 							<Field.Field data-invalid={nameIssues !== undefined} data-disabled={!editable}>
 								<Field.FieldLabel for="canvas-name">{m.canvas_name()}</Field.FieldLabel>
 								<Input
