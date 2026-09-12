@@ -13,7 +13,7 @@ import {
 } from '@xyflow/svelte';
 import '@xyflow/svelte/dist/style.css';
 import { mode } from 'mode-watcher';
-import { tick } from 'svelte';
+import { tick, untrack } from 'svelte';
 import { toast } from 'svelte-sonner';
 import {
 	connectNodePorts,
@@ -32,11 +32,17 @@ import {
 	buildFlowNodes,
 	buildPortIndex,
 	canConnect,
+	keepEdges,
+	keepNodes,
+	mergeTombstones,
 	parseFlowNodeId,
+	reconcileFlowEdges,
+	reconcileFlowNodes,
 	type FlowNode,
 	type ForceTarget,
 	type PortIndexEntry,
-	type SheetTarget
+	type SheetTarget,
+	type Tombstones
 } from '#lib/components/canvas/graph.js';
 import EntryNode from '#lib/components/canvas/nodes/EntryNode.svelte';
 import ExitNode from '#lib/components/canvas/nodes/ExitNode.svelte';
@@ -65,6 +71,16 @@ let sheetTarget = $state<SheetTarget | null>(null);
 let forceTargets = $state<ForceTarget[]>([]);
 let problemsOpen = $state(false);
 let flowEl = $state<HTMLDivElement | null>(null);
+/**
+ * The delete batches still in flight, each owning what it dropped from the
+ * mirror. Every delete command refreshes the shared graph query, so without this
+ * the first one would pop the items whose command has not run yet back onto the
+ * canvas. A batch removes only its own entry when it settles, so two overlapping
+ * gestures cannot lift each other's protection; the re-reconcile that follows is
+ * what restores anything the control plane refused.
+ */
+let deleteBatches = $state.raw<Tombstones[]>([]);
+const pendingDeletes = $derived(mergeTombstones(deleteBatches));
 
 const { screenToFlowPosition, updateNode } = useSvelteFlow();
 const updateNodeInternals = useUpdateNodeInternals();
@@ -77,18 +93,25 @@ const nodeTypes = {
 	loadBalance: LoadBalanceNode
 };
 
-// The server owns the graph: every refresh rebuilds the local mirror. Handle
-// counts change whenever pods or load-balance members do, so Svelte Flow is told
-// to re-measure; without it, it keeps stale handle geometry.
+// The server owns the graph, but a refresh is merged into the local mirror
+// instead of replacing it: untouched nodes keep their object identity, so they
+// neither re-render nor lose their measured geometry. Only the nodes that
+// actually changed are re-measured — handle counts move with pods and
+// load-balance members, and stale handle geometry would misplace their edges.
 $effect(() => {
 	const current = graph.current;
 	if (!current) return;
-	const nextNodes = buildFlowNodes(current);
-	nodes = nextNodes;
-	edges = buildFlowEdges(current);
+	const gone = pendingDeletes;
+	const nextNodes = gone ? keepNodes(buildFlowNodes(current), gone) : buildFlowNodes(current);
+	const nextEdges = gone ? keepEdges(buildFlowEdges(current), gone) : buildFlowEdges(current);
+	const merged = untrack(() => reconcileFlowNodes(nodes, nextNodes));
+	nodes = merged.nodes;
+	edges = untrack(() => reconcileFlowEdges(edges, nextEdges));
 	portIndex = buildPortIndex(current);
-	const ids = nextNodes.map(node => node.id);
-	tick().then(() => updateNodeInternals(ids));
+	if (merged.remeasure.length > 0) {
+		const ids = merged.remeasure;
+		tick().then(() => updateNodeInternals(ids));
+	}
 });
 
 const refresh = () => getCanvasGraph({ canvasId }).refresh();
@@ -187,8 +210,12 @@ async function connect(connection: Connection) {
 }
 
 /**
- * Always returns `false`: deletions are the server's to make, and the refresh
- * that follows rebuilds the local mirror from what actually happened.
+ * Always returns `false`: deletions are the server's to make. The whole doomed
+ * selection leaves the local mirror before any command is awaited, so the canvas
+ * reacts to the keypress immediately instead of trailing the slowest call, and
+ * stays gone for the rest of the batch through `pendingDeletes`. Clearing that
+ * re-reconciles against the graph the control plane actually kept, which is what
+ * puts a refused item back.
  */
 async function beforeDelete({
 	nodes: doomedNodes,
@@ -200,41 +227,58 @@ async function beforeDelete({
 	const failures: ForceTarget[] = [];
 	let deleted = false;
 
-	for (const edge of doomedEdges) {
-		try {
-			await disconnectEdge({ canvasId, edgeId: edge.id, force: false });
-			deleted = true;
-		} catch (err) {
-			failures.push({
-				kind: 'edge',
-				id: edge.id,
-				label: m.editor_disconnected(),
-				message: failureMessage(err)
-			});
-		}
-	}
+	const gone: Tombstones = {
+		nodes: new Set(doomedNodes.map(node => node.id)),
+		edges: new Set(doomedEdges.map(edge => edge.id))
+	};
+	deleteBatches = [...deleteBatches, gone];
+	nodes = keepNodes(nodes, gone);
+	edges = keepEdges(edges, gone);
 
-	for (const node of doomedNodes) {
-		const { kind, id } = parseFlowNodeId(node.id);
-		const label = node.data.kind === 'server' ? node.data.server.name : node.data.node.name;
-		try {
-			if (kind === 'server') await deleteServerNode({ canvasId, serverId: id, force: false });
-			else await deleteNode({ canvasId, nodeId: id, force: false });
-			deleted = true;
-		} catch (err) {
-			failures.push({ kind, id, label, message: failureMessage(err) });
+	try {
+		for (const edge of doomedEdges) {
+			try {
+				await disconnectEdge({ canvasId, edgeId: edge.id, force: false });
+				deleted = true;
+			} catch (err) {
+				failures.push({
+					kind: 'edge',
+					id: edge.id,
+					label: m.editor_disconnected(),
+					message: failureMessage(err)
+				});
+			}
 		}
+
+		for (const node of doomedNodes) {
+			const { kind, id } = parseFlowNodeId(node.id);
+			const label = node.data.kind === 'server' ? node.data.server.name : node.data.node.name;
+			try {
+				if (kind === 'server') await deleteServerNode({ canvasId, serverId: id, force: false });
+				else await deleteNode({ canvasId, nodeId: id, force: false });
+				deleted = true;
+			} catch (err) {
+				failures.push({ kind, id, label, message: failureMessage(err) });
+			}
+		}
+	} finally {
+		// This batch has settled: it stops hiding its own items, so the reconcile
+		// that follows brings back whatever the control plane refused. Any batch
+		// still running keeps hiding its own.
+		deleteBatches = deleteBatches.filter(batch => batch !== gone);
 	}
 
 	if (failures.length > 0) {
 		// Forcing needs admin; everyone else only gets the reason.
 		if (admin) forceTargets = failures;
 		else toast.error(failures[0]?.message ?? '');
+		// Every refusal above left the server untouched, but a call can also fail
+		// after the control plane acted, so this one case is re-read.
+		await refresh();
 	} else if (deleted) {
 		toast.success(m.editor_deleted());
 	}
 
-	await refresh();
 	return false;
 }
 
@@ -251,7 +295,9 @@ function openProblem(nodeIds: string[]) {
 
 <div class="relative h-full w-full" bind:this={flowEl}>
 	<svelte:boundary>
-		{#if graph.loading}
+		<!-- Only the first load has nothing to show: a refresh keeps the flow mounted,
+		     otherwise remounting it would re-run `fitView` and reset the viewport. -->
+		{#if graph.current === undefined}
 			<Skeleton class="h-full w-full" />
 		{:else}
 			{@const current = graph.current}
