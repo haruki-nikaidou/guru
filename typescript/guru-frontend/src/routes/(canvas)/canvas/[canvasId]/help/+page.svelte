@@ -15,6 +15,7 @@ const steps = [
 	{ title: m.help_step_connect_title, body: m.help_step_connect_body },
 	{ title: m.help_step_arrange_title, body: m.help_step_arrange_body },
 	{ title: m.help_step_problems_title, body: m.help_step_problems_body },
+	{ title: m.help_step_subcanvas_title, body: m.help_step_subcanvas_body },
 	{ title: m.help_step_delete_title, body: m.help_step_delete_body }
 ];
 

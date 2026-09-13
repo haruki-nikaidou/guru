@@ -61,7 +61,7 @@ const addressOf = (ipRecordId: string): string =>
 					</span>
 				</p>
 				{#each pod.ports as port (port.id)}
-					<PortHandle {port} label={portLabel(port.key)} />
+					<PortHandle {port} label={portLabel(port)} />
 				{/each}
 			</div>
 		{/each}

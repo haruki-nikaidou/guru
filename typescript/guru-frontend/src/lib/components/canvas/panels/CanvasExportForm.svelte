@@ -1,0 +1,131 @@
+<script lang="ts">
+import { untrack } from 'svelte';
+import { toast } from 'svelte-sonner';
+import { replaceExportSpec, updateNodeText } from '#lib/components/canvas/commands.js';
+import { Button } from '#lib/components/ui/button/index.js';
+import * as Field from '#lib/components/ui/field/index.js';
+import { Input } from '#lib/components/ui/input/index.js';
+import * as Select from '#lib/components/ui/select/index.js';
+import { Spinner } from '#lib/components/ui/spinner/index.js';
+import { Textarea } from '#lib/components/ui/textarea/index.js';
+import type { CanvasExportAsName, CanvasExportNodeDto, PortKindName } from '#lib/dto/topology.js';
+import { errorMessage } from '#lib/i18n/codes.js';
+import { m } from '#lib/paraglide/messages.js';
+
+let {
+	canvasId,
+	node,
+	editable
+}: { canvasId: string; node: CanvasExportNodeDto; editable: boolean } = $props();
+
+const KINDS: PortKindName[] = ['derive_listen', 'derive_destination'];
+const DIRECTIONS: CanvasExportAsName[] = ['input_into_canvas', 'output_out_of_canvas'];
+const kindLabel = (value: PortKindName): string =>
+	value === 'derive_listen' ? m.editor_port_listen() : m.editor_port_destination();
+const directionLabel = (value: CanvasExportAsName): string =>
+	value === 'input_into_canvas'
+		? m.editor_export_input_into_canvas()
+		: m.editor_export_output_out_of_canvas();
+
+let name = $state('');
+let comment = $state('');
+let portKind = $state<PortKindName>('derive_listen');
+let exportAs = $state<CanvasExportAsName>('input_into_canvas');
+let pending = $state(false);
+
+let seededFor = $state('');
+$effect(() => {
+	if (seededFor === node.id) return;
+	seededFor = node.id;
+	const snapshot = node;
+	untrack(() => {
+		name = snapshot.name;
+		comment = snapshot.comment;
+		portKind = snapshot.portKind;
+		exportAs = snapshot.exportAs;
+	});
+});
+
+const reshapes = $derived(portKind !== node.portKind || exportAs !== node.exportAs);
+
+async function save() {
+	pending = true;
+	try {
+		// The name is what the parent labels the mirrored port with, so it is
+		// saved even when the shape is unchanged.
+		await updateNodeText({ canvasId, nodeId: node.id, name, comment, boundary: true });
+		if (reshapes) await replaceExportSpec({ canvasId, nodeId: node.id, portKind, exportAs });
+		toast.success(m.editor_saved());
+	} catch (err) {
+		const body = (err as { body?: App.Error }).body;
+		toast.error(errorMessage(body?.code, body?.message ?? ''));
+	} finally {
+		pending = false;
+	}
+}
+</script>
+
+<Field.FieldGroup>
+	<Field.Field>
+		<Field.FieldLabel for="export-name">{m.editor_node_name()}</Field.FieldLabel>
+		<Input id="export-name" bind:value={name} disabled={!editable} />
+		<Field.FieldDescription>{m.editor_export_name_hint()}</Field.FieldDescription>
+	</Field.Field>
+
+	<Field.Field>
+		<Field.FieldLabel for="export-comment">{m.editor_node_comment()}</Field.FieldLabel>
+		<Textarea id="export-comment" bind:value={comment} disabled={!editable} />
+	</Field.Field>
+
+	<Field.Field>
+		<Field.FieldLabel for="export-kind">{m.editor_export_kind()}</Field.FieldLabel>
+		<Select.Root
+			type="single"
+			value={portKind}
+			disabled={!editable}
+			onValueChange={next => (portKind = next as PortKindName)}
+		>
+			<Select.Trigger id="export-kind">{kindLabel(portKind)}</Select.Trigger>
+			<Select.Content>
+				<Select.Group>
+					{#each KINDS as option (option)}
+						<Select.Item value={option} label={kindLabel(option)}>{kindLabel(option)}</Select.Item>
+					{/each}
+				</Select.Group>
+			</Select.Content>
+		</Select.Root>
+	</Field.Field>
+
+	<Field.Field>
+		<Field.FieldLabel for="export-direction">{m.editor_export_direction()}</Field.FieldLabel>
+		<Select.Root
+			type="single"
+			value={exportAs}
+			disabled={!editable}
+			onValueChange={next => (exportAs = next as CanvasExportAsName)}
+		>
+			<Select.Trigger id="export-direction">{directionLabel(exportAs)}</Select.Trigger>
+			<Select.Content>
+				<Select.Group>
+					{#each DIRECTIONS as option (option)}
+						<Select.Item value={option} label={directionLabel(option)}>
+							{directionLabel(option)}
+						</Select.Item>
+					{/each}
+				</Select.Group>
+			</Select.Content>
+		</Select.Root>
+		<Field.FieldDescription>{m.editor_export_direction_hint()}</Field.FieldDescription>
+	</Field.Field>
+
+	{#if reshapes}
+		<Field.FieldDescription class="text-destructive">
+			{m.editor_export_reshape_warning()}
+		</Field.FieldDescription>
+	{/if}
+</Field.FieldGroup>
+
+<Button class="mt-6 w-full" disabled={!editable || pending} onclick={save}>
+	{#if pending}<Spinner data-icon="inline-start" />{/if}
+	{m.common_save()}
+</Button>

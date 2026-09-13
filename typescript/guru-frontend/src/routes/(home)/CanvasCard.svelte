@@ -22,6 +22,13 @@ let deleteOpen = $state(false);
 			<a href="/canvas/{canvas.id}" class="hover:underline">{canvas.name}</a>
 		</Card.Title>
 		<Card.Description>{canvas.description || m.canvas_no_description()}</Card.Description>
+		{#if canvas.parent}
+			{@const parent = canvas.parent}
+			<p class="text-xs text-muted-foreground">
+				{m.canvas_subcanvas_of()}
+				<a href="/canvas/{parent.id}" class="hover:underline">{parent.name}</a>
+			</p>
+		{/if}
 		{#if editable}
 			<Card.Action>
 				<DropdownMenu.Root>

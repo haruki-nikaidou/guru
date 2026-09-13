@@ -1,4 +1,5 @@
 <script lang="ts">
+import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 import PlusIcon from '@lucide/svelte/icons/plus';
 import {
 	Background,
@@ -23,6 +24,7 @@ import {
 	deleteServerNode,
 	disconnectEdge,
 	getCanvasGraph,
+	locateNodeCanvas,
 	moveNode,
 	moveServerNode
 } from '#lib/components/canvas/commands.js';
@@ -46,16 +48,21 @@ import {
 	type PanelTarget,
 	type Tombstones
 } from '#lib/components/canvas/graph.js';
+import CanvasExportNode from '#lib/components/canvas/nodes/CanvasExportNode.svelte';
+import CanvasImportNode from '#lib/components/canvas/nodes/CanvasImportNode.svelte';
 import EntryNode from '#lib/components/canvas/nodes/EntryNode.svelte';
 import ExitNode from '#lib/components/canvas/nodes/ExitNode.svelte';
 import LoadBalanceNode from '#lib/components/canvas/nodes/LoadBalanceNode.svelte';
 import RelayNode from '#lib/components/canvas/nodes/RelayNode.svelte';
 import ServerNode from '#lib/components/canvas/nodes/ServerNode.svelte';
+import AddExportDialog from '#lib/components/canvas/panels/AddExportDialog.svelte';
+import AddSubcanvasDialog from '#lib/components/canvas/panels/AddSubcanvasDialog.svelte';
 import ForceDeleteDialog from '#lib/components/canvas/panels/ForceDeleteDialog.svelte';
 import NodePanel from '#lib/components/canvas/panels/NodePanel.svelte';
 import { Badge } from '#lib/components/ui/badge/index.js';
 import { Button } from '#lib/components/ui/button/index.js';
 import * as Card from '#lib/components/ui/card/index.js';
+import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js';
 import * as Empty from '#lib/components/ui/empty/index.js';
 import * as Resizable from '#lib/components/ui/resizable/index.js';
 import { Skeleton } from '#lib/components/ui/skeleton/index.js';
@@ -63,6 +70,9 @@ import { errorMessage } from '#lib/i18n/codes.js';
 import { suggestName } from '#lib/i18n/naming.js';
 import { m } from '#lib/paraglide/messages.js';
 import { getLocale } from '#lib/paraglide/runtime.js';
+import type { CanvasGraph } from '#lib/dto/topology.js';
+import { goto, replaceState } from '$app/navigation';
+import { page } from '$app/state';
 
 let { canvasId, editable, admin }: { canvasId: string; editable: boolean; admin: boolean } =
 	$props();
@@ -95,7 +105,9 @@ const nodeTypes = {
 	entry: EntryNode,
 	relay: RelayNode,
 	exit: ExitNode,
-	loadBalance: LoadBalanceNode
+	loadBalance: LoadBalanceNode,
+	canvasImport: CanvasImportNode,
+	canvasExport: CanvasExportNode
 };
 
 // The node cards read this to ring the one the panel is editing.
@@ -205,6 +217,35 @@ async function addNode(
 }
 
 /**
+ * The subcanvas dialogs take their placement and default name as callbacks so
+ * both are computed when the operator confirms, not when the dialog mounted.
+ */
+let subcanvasMode = $state<'create' | 'import'>('create');
+let subcanvasOpen = $state(false);
+let exportDialogOpen = $state(false);
+const suggestSubcanvasName = () => suggestName(m.editor_kind_subcanvas(), getLocale(), usedNames());
+const suggestExportName = () => suggestName(m.editor_kind_export(), getLocale(), usedNames());
+
+/**
+ * Descends into the canvas an import node embeds. Svelte Flow has no
+ * double-click event and delivers a pointer event whose `detail` is always 0,
+ * so the second click is recognised here: same node, within the usual
+ * double-click window.
+ */
+const DOUBLE_CLICK_MS = 400;
+let lastClick: { id: string; at: number } | null = null;
+
+function selectNode(node: FlowNode) {
+	panelTarget = parseFlowNodeId(node.id);
+	const now = Date.now();
+	const again = lastClick?.id === node.id && now - lastClick.at < DOUBLE_CLICK_MS;
+	lastClick = again ? null : { id: node.id, at: now };
+	if (!again || node.data.kind !== 'canvas_import') return;
+	const target = node.data.node.targetCanvasId;
+	if (target) goto(`/canvas/${target}`);
+}
+
+/**
  * Positions are persisted on drop. These two commands deliberately skip the
  * query refresh: the local position already matches, so re-rendering the whole
  * graph after every drag would only cost a flicker.
@@ -219,13 +260,15 @@ async function persistMove(dragged: FlowNode[]) {
 				await moveServerNode({ canvasId, serverId: id, x, y });
 			} else if (node.data.kind !== 'server') {
 				// `UpdateNodeMeta` replaces name and comment, so they are resent as-is.
+				// An export's y orders the mirrored ports on the parent's import node.
 				await moveNode({
 					canvasId,
 					nodeId: id,
 					name: node.data.node.name,
 					comment: node.data.node.comment,
 					x,
-					y
+					y,
+					boundary: node.data.kind === 'canvas_export'
 				});
 			}
 		}
@@ -318,12 +361,24 @@ async function beforeDelete({
 		for (const node of doomedNodes) {
 			const { kind, id } = parseFlowNodeId(node.id);
 			const label = node.data.kind === 'server' ? node.data.server.name : node.data.node.name;
+			// Retiring an import hands its target back to the root listing; retiring
+			// an export takes its mirrored port off the parent's import node.
+			const subcanvasTarget =
+				node.data.kind === 'canvas_import' ? node.data.node.targetCanvasId : '';
+			const boundary = node.data.kind === 'canvas_export';
 			try {
 				if (kind === 'server') await deleteServerNode({ canvasId, serverId: id, force: false });
-				else await deleteNode({ canvasId, nodeId: id, force: false });
+				else await deleteNode({ canvasId, nodeId: id, force: false, subcanvasTarget, boundary });
 				deleted = true;
 			} catch (err) {
-				failures.push({ kind, id, label, message: failureMessage(err) });
+				failures.push({
+					kind,
+					id,
+					label,
+					message: failureMessage(err),
+					subcanvasTarget,
+					boundary
+				});
 			}
 		}
 	} finally {
@@ -347,15 +402,56 @@ async function beforeDelete({
 	return false;
 }
 
-function openProblem(nodeIds: string[]) {
+/** Selects a node of this canvas and opens its panel. */
+function focusNode(current: CanvasGraph, nodeId: string): boolean {
+	const located = buildBackendIndex(current).get(nodeId);
+	if (!located) return false;
+	updateNode(located.flowId, { selected: true });
+	panelTarget = located.target;
+	return true;
+}
+
+/**
+ * Jumps to the node a problem concerns. Validation runs on the whole canvas
+ * tree, so the node may live in another canvas of it: then the editor opens
+ * that canvas and hands the node over in `?focus`, which the instance mounted
+ * there consumes below.
+ */
+async function openProblem(nodeIds: string[]) {
 	const current = graph.current;
 	const first = nodeIds[0];
 	if (!current || first === undefined) return;
-	const located = buildBackendIndex(current).get(first);
-	if (!located) return;
-	updateNode(located.flowId, { selected: true });
-	panelTarget = located.target;
+	if (focusNode(current, first)) return;
+	try {
+		const owner = await locateNodeCanvas({ canvasId, nodeId: first });
+		if (owner) await goto(`/canvas/${owner}?focus=${encodeURIComponent(first)}`);
+	} catch (err) {
+		reportError(err);
+	}
 }
+
+/**
+ * The handover from a problem opened on another canvas of the tree. It runs
+ * once the graph is there, then drops the parameter so a reload does not
+ * re-select a node the operator has since moved on from.
+ */
+let focusHandled = $state('');
+$effect(() => {
+	const wanted = page.url.searchParams.get('focus');
+	// No parameter: the last handover is spent, so the same node may be handed
+	// over again later — this component instance survives the navigation.
+	if (!wanted) {
+		focusHandled = '';
+		return;
+	}
+	const current = graph.current;
+	if (!current || focusHandled === wanted) return;
+	focusHandled = wanted;
+	if (!untrack(() => focusNode(current, wanted))) return;
+	const url = new URL(page.url.href);
+	url.searchParams.delete('focus');
+	replaceState(url, page.state);
+});
 </script>
 
 <svelte:window onkeyup={nudgeStop} />
@@ -382,7 +478,7 @@ function openProblem(nodeIds: string[]) {
 						{isValidConnection}
 						onconnect={connect}
 						onbeforedelete={beforeDelete}
-						onnodeclick={({ node }) => (panelTarget = parseFlowNodeId(node.id))}
+						onnodeclick={({ node }) => selectNode(node)}
 						onnodedragstop={({ nodes: dragged }) => persistMove(dragged)}
 						deleteKey={editable ? 'Delete' : null}
 					>
@@ -437,6 +533,43 @@ function openProblem(nodeIds: string[]) {
 									>
 										<PlusIcon />
 										{m.editor_add_lb_aggregate()}
+									</Button>
+									<DropdownMenu.Root>
+										<DropdownMenu.Trigger>
+											{#snippet child({ props })}
+												<Button {...props} size="sm" variant="secondary">
+													<PlusIcon />
+													{m.editor_kind_subcanvas()}
+													<ChevronDownIcon />
+												</Button>
+											{/snippet}
+										</DropdownMenu.Trigger>
+										<DropdownMenu.Content align="start">
+											<DropdownMenu.Item
+												onSelect={() => {
+													subcanvasMode = 'create';
+													subcanvasOpen = true;
+												}}
+											>
+												{m.editor_subcanvas_create_title()}
+											</DropdownMenu.Item>
+											<DropdownMenu.Item
+												onSelect={() => {
+													subcanvasMode = 'import';
+													subcanvasOpen = true;
+												}}
+											>
+												{m.editor_subcanvas_import_title()}
+											</DropdownMenu.Item>
+										</DropdownMenu.Content>
+									</DropdownMenu.Root>
+									<Button
+										size="sm"
+										variant="secondary"
+										onclick={() => (exportDialogOpen = true)}
+									>
+										<PlusIcon />
+										{m.editor_kind_export()}
 									</Button>
 								</div>
 							</Panel>
@@ -506,6 +639,22 @@ function openProblem(nodeIds: string[]) {
 
 		{#if admin}
 			<ForceDeleteDialog bind:targets={forceTargets} {canvasId} />
+		{/if}
+
+		{#if editable}
+			<AddSubcanvasDialog
+				bind:open={subcanvasOpen}
+				mode={subcanvasMode}
+				{canvasId}
+				place={palettePosition}
+				suggest={suggestSubcanvasName}
+			/>
+			<AddExportDialog
+				bind:open={exportDialogOpen}
+				{canvasId}
+				place={palettePosition}
+				suggest={suggestExportName}
+			/>
 		{/if}
 	{/if}
 
