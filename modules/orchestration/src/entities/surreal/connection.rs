@@ -31,13 +31,7 @@ impl Processor<ConnectPorts> for SurrealProcessor {
         // Statement 0 is BEGIN; the RETURN below is statement 3.
         let mut resp = self
             .db()
-            .query(
-                "BEGIN TRANSACTION;
-                 LET $edge = (RELATE ONLY $source->orchestration_edge_connection->$target);
-                 fn::orchestration_touch($canvas);
-                 RETURN $edge;
-                 COMMIT TRANSACTION;",
-            )
+            .query(include_str!("../../../sql/connection/connect_ports.surql"))
             .bind(("source", input.source))
             .bind(("target", input.target))
             .bind(("canvas", input.canvas))

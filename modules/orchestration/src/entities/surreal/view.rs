@@ -272,13 +272,9 @@ impl Processor<ListServerWatchState> for SurrealProcessor {
     async fn process(&self, input: ListServerWatchState) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
-            .query(
-                "SELECT server AS id, server.refresh_key_generation AS refresh_key_generation,
-                     server.watch_epoch AS watch_epoch, desired.revision AS desired_revision,
-                     in_flight.revision AS in_flight_revision,
-                     applied.revision AS applied_revision, failed_revision
-                 FROM orchestration_server_config_view WHERE server IN $servers",
-            )
+            .query(include_str!(
+                "../../../sql/view/list_server_watch_state.surql"
+            ))
             .bind(("servers", input.servers))
             .await?;
         resp.take::<Vec<ServerWatchState>>(0)
