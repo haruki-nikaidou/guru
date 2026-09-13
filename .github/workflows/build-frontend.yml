@@ -1,23 +1,11 @@
 name: Build Frontend Image
 
+# Images are cut from tags only: `frontend-v0.1.0`, `frontend-v0.1.0-alpha`, ...
+# Branch pushes never publish.
 on:
   push:
-    branches:
-      - main
-    # Path filters are not evaluated for tag pushes, so tagged releases always
-    # build.
-    paths:
-      - "typescript/**"
-      - "package.json"
-      - "bun.lock"
-      - "biome.json"
-      - "frontend.Dockerfile"
-      - ".dockerignore"
-      - ".github/workflows/build-frontend.yml"
-    # Every tag builds. Path filters are not evaluated for tag pushes.
     tags:
-      - "**"
-  workflow_dispatch:
+      - "frontend-v*"
 
 permissions:
   contents: read
@@ -25,7 +13,7 @@ permissions:
 
 concurrency:
   group: build-frontend-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/guru-frontend
@@ -36,6 +24,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#frontend-}"
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          # `latest` only moves for final releases, never for pre-releases
+          # (`-alpha`, `-rc.1`, ...).
+          if [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "latest=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >>"$GITHUB_OUTPUT"
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -53,11 +55,9 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short,enable={{is_default_branch}}
-            type=match,pattern=^frontend-(v.*)$,group=1
-            type=match,pattern=^(v.*)$,group=1
-            type=ref,event=tag
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.latest == 'true' }}
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push
         uses: docker/build-push-action@v6

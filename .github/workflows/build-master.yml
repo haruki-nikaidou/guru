@@ -1,26 +1,11 @@
 name: Build Master Image
 
+# Images are cut from tags only: `master-v0.1.0`, `master-v0.1.0-alpha`, ...
+# Branch pushes never publish.
 on:
   push:
-    branches:
-      - main
-    # Any change that can alter the `guru-master` binary. Path filters are not
-    # evaluated for tag pushes, so tagged releases always build.
-    paths:
-      - "bin/guru-master/**"
-      - "lib/**"
-      - "modules/**"
-      - "proto/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "master.Dockerfile"
-      - ".dockerignore"
-      - ".github/workflows/build-master.yml"
-    # Every tag builds. Path filters are not evaluated for tag pushes.
     tags:
-      - "**"
-  workflow_dispatch:
+      - "master-v*"
 
 permissions:
   contents: read
@@ -28,7 +13,7 @@ permissions:
 
 concurrency:
   group: build-master-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/guru-master
@@ -39,6 +24,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#master-}"
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          # `latest` only moves for final releases, never for pre-releases
+          # (`-alpha`, `-rc.1`, ...).
+          if [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "latest=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >>"$GITHUB_OUTPUT"
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -56,11 +55,9 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short,enable={{is_default_branch}}
-            type=match,pattern=^master-(v.*)$,group=1
-            type=match,pattern=^(v.*)$,group=1
-            type=ref,event=tag
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.latest == 'true' }}
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push
         uses: docker/build-push-action@v6

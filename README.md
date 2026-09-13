@@ -35,16 +35,16 @@ its `AckConfig` promotes `in_flight` → `applied`. Derivation is convergent: a
 server only switches destination once the target actually serves it, so no
 revision drops traffic mid-rollout.
 
-## Images
+## Releases
 
-| Image | Base | Tagged |
-|---|---|---|
-| `ghcr.io/haruki-nikaidou/guru-master` | `distroless/cc-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `master-v*` / `v*` |
-| `ghcr.io/haruki-nikaidou/guru-frontend` | `distroless/nodejs24-debian13:nonroot` | `latest` + `sha-<short>` on any `main` commit (merged PR or direct push); the tag name on every pushed tag, plus `<version>` for `frontend-v*` / `v*` |
+Only tag pushes publish. `<version>` is the tag minus its prefix; `latest` moves
+only for a final `vX.Y.Z`.
 
-Every pushed tag builds both images and tags them with the tag name; the
-`master-v*` / `frontend-v*` / `v*` conventions additionally produce a bare
-`<version>` tag on the matching image.
+| Tag | Publishes |
+|---|---|
+| `master-v0.1.0[-alpha]` | `ghcr.io/haruki-nikaidou/guru-master:<version>` (`distroless/cc-debian13:nonroot`) |
+| `frontend-v0.1.0[-alpha]` | `ghcr.io/haruki-nikaidou/guru-frontend:<version>` (`distroless/nodejs24-debian13:nonroot`) |
+| `worker-v0.1.0[-alpha]` | GitHub release with the raw `linux/x86_64` `guru-worker` binary |
 
 Both build from the repository root — the frontend needs the whole Bun workspace
 for the `app-protobuf` package:
