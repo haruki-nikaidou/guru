@@ -139,16 +139,7 @@ impl Processor<LoadCanvasTree> for SurrealProcessor {
         // Statement 0 is BEGIN, 1-2 the LETs; canvases at 3, links at 4, root at 5.
         let mut resp = self
             .db()
-            .query(
-                "BEGIN TRANSACTION;
-                 LET $root = fn::orchestration_root($canvas);
-                 LET $tree = fn::orchestration_tree($root, 0);
-                 SELECT * FROM orchestration_canvas WHERE id IN $tree;
-                 SELECT canvas, spec.config.canvas AS target FROM orchestration_node
-                     WHERE canvas IN $tree AND spec.config.canvas != NONE;
-                 RETURN $root;
-                 COMMIT TRANSACTION;",
-            )
+            .query(include_str!("../../../sql/canvas/load_canvas_tree.surql"))
             .bind(("canvas", input.canvas))
             .await?;
         let canvases = resp.take::<Vec<CanvasEntity>>(3)?;

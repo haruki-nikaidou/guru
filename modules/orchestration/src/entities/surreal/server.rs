@@ -157,13 +157,9 @@ impl Processor<UpdateServerSettings> for SurrealProcessor {
         // Statement 0 is BEGIN; the update is statement 1.
         let mut resp = self
             .db()
-            .query(
-                "BEGIN TRANSACTION;
-                 UPDATE $id SET name = $name, icon = $icon, comment = $comment,
-                     ipv6_resolve = $ipv6_resolve, log_level = $log_level RETURN AFTER;
-                 fn::orchestration_touch($canvas);
-                 COMMIT TRANSACTION;",
-            )
+            .query(include_str!(
+                "../../../sql/server/update_server_settings.surql"
+            ))
             .bind(("id", input.id))
             .bind(("canvas", input.canvas))
             .bind(("name", input.name))
