@@ -10,6 +10,6 @@ CREATE orchestration_server_config_view CONTENT {
     failed_revision: NONE, apply_error: NONE, derive_error: NONE,
     invalid_pods: [], waiting_for: []
 };
-UPDATE $canvas SET generation += 1;
+fn::orchestration_touch($canvas);
 RETURN $server;
 COMMIT TRANSACTION;

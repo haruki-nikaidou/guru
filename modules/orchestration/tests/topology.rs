@@ -7,11 +7,11 @@ mod mem;
 
 use mem::*;
 use orchestration::entities::surreal::node::{
-    CanvasImportConfig, EntryConfig, ExitConfig, LoadBalanceAggregateConfig,
+    CanvasExportAs, EntryConfig, ExitConfig, LoadBalanceAggregateConfig,
     LoadBalanceDistributeConfig, LoadBalanceMode, NodeSpec, PodConfig, ProxyProtocolVersion,
     RelayConfig, RelayProtocol,
 };
-use orchestration::entities::surreal::port::{PortDirection, PortKind};
+use orchestration::entities::surreal::port::{PortDirection, PortEntity, PortKind};
 use orchestration::entities::surreal::server::ServerIpRecordId;
 use orchestration::services::topology::{
     ProblemKind, ProblemSeverity, TopologyProblem, analyze, ensure_valid,
@@ -128,9 +128,15 @@ fn a_node_cannot_connect_to_itself() {
 
 #[test]
 fn edges_may_not_cross_canvases() {
-    let b = valid_builder();
+    let mut b = valid_builder();
+    // Same shape, but the exit lives on another canvas of the same tree.
+    b.canvas("other");
+    b.node("exit2", exit("10.0.0.6:8080"), exit_ports());
+    b.connect("exit2-destination", "pod-destination");
     let mut topology = b.build();
-    topology.nodes[2].node.canvas = ids::canvas_id("other");
+    topology
+        .edges
+        .retain(|e| ids::record_key(&e.id.0) != "exit-destination->pod-destination");
     let problems = analyze(&topology);
     assert!(errors(&problems).contains(&ProblemKind::EdgeCrossCanvas));
 }
@@ -165,15 +171,84 @@ fn a_node_must_have_the_ports_its_spec_requires() {
 }
 
 #[test]
-fn canvas_import_and_export_are_rejected() {
+fn importing_yourself_is_rejected() {
     let mut b = Builder::new("prod");
+    b.node("import", import_spec("prod"), vec![]);
+    let problems = analyze(&b.build());
+    assert_eq!(errors(&problems), vec![ProblemKind::CanvasImportSelf]);
+}
+
+#[test]
+fn importing_an_ancestor_is_rejected() {
+    let mut b = Builder::new("root");
+    b.node("import_sub", import_spec("sub"), vec![]);
+    b.canvas("sub");
+    b.node("import_root", import_spec("root"), vec![]);
+    let problems = analyze(&b.build());
+    assert!(
+        errors(&problems).contains(&ProblemKind::CanvasImportAncestor),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn importing_a_canvas_twice_is_rejected() {
+    let mut b = Builder::new("root");
+    b.node("import_a", import_spec("sub"), vec![]);
+    b.node("import_b", import_spec("sub"), vec![]);
+    b.canvas("sub");
+    let problems = analyze(&b.build());
+    assert_eq!(errors(&problems), vec![ProblemKind::CanvasImportDuplicate]);
+}
+
+#[test]
+fn importing_a_missing_canvas_is_rejected() {
+    let mut b = Builder::new("root");
+    b.node("import", import_spec("ghost"), vec![]);
+    let problems = analyze(&b.build());
+    assert_eq!(errors(&problems), vec![ProblemKind::CanvasImportUnresolved]);
+}
+
+#[test]
+fn an_import_node_mirrors_the_exports_of_its_target() {
+    let mut b = Builder::new("root");
     b.node(
         "import",
-        NodeSpec::CanvasImport(CanvasImportConfig {}),
-        vec![],
+        import_spec("sub"),
+        import_ports(&[(
+            "out",
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        )]),
     );
-    let problems = analyze(&b.build());
-    assert_eq!(errors(&problems), vec![ProblemKind::UnsupportedSpec]);
+    b.canvas("sub");
+    b.node(
+        "out",
+        export_spec(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+        export_ports(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+    );
+    assert_eq!(errors(&analyze(&b.build())), vec![]);
+
+    // A stale extra port on the importer no longer matches the exports.
+    let mut stale = b.build();
+    stale.nodes[0].ports.push(PortEntity {
+        id: ids::port_id("stale"),
+        owner: ids::node_id("import"),
+        kind: PortKind::DeriveListen,
+        direction: PortDirection::Input,
+        key: "gone".to_string(),
+        position: 1,
+    });
+    assert_eq!(
+        errors(&analyze(&stale)),
+        vec![ProblemKind::PortShapeInvalid]
+    );
 }
 
 #[test]
@@ -188,6 +263,155 @@ fn a_pod_must_reference_an_ip_of_this_canvas() {
     b.connect("exit-destination", "pod-destination");
     let problems = analyze(&b.build());
     assert_eq!(errors(&problems), vec![ProblemKind::PodIpForeign]);
+}
+
+/// A pod in a subcanvas listening on a server of the root, with its whole chain
+/// inside the subcanvas.
+fn pod_in_sub_on_root_server(import: bool) -> Builder {
+    let mut b = Builder::new("root");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+    if import {
+        b.node("import", import_spec("sub"), vec![]);
+    }
+    b.canvas("sub");
+    b.node("pod", pod(&ip, 443), pod_ports());
+    b.node("entry", entry(None), entry_ports());
+    b.node("exit", exit("10.0.0.5:8080"), exit_ports());
+    b.connect("pod-listen", "entry-listen");
+    b.connect("exit-destination", "pod-destination");
+    b
+}
+
+#[test]
+fn a_pod_may_use_a_server_anywhere_in_its_tree() {
+    let problems = analyze(&pod_in_sub_on_root_server(true).build());
+    assert_eq!(errors(&problems), vec![], "{problems:?}");
+}
+
+#[test]
+fn a_pod_may_not_use_a_server_of_another_tree() {
+    let problems = analyze(&pod_in_sub_on_root_server(false).build());
+    assert_eq!(errors(&problems), vec![ProblemKind::PodIpForeign]);
+}
+
+/// pod -> relay in root; the relay's destination goes into `sub`, whose export
+/// feeds the very pod the relay listens to.
+#[test]
+fn a_cycle_through_an_import_boundary_is_detected() {
+    let mut b = Builder::new("root");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+    b.node("pod", pod(&ip, 443), pod_ports());
+    b.node("relay", relay(RelayProtocol::TcpRaw), relay_ports());
+    b.node(
+        "import",
+        import_spec("sub"),
+        import_ports(&[
+            (
+                "into",
+                PortKind::DeriveDestination,
+                CanvasExportAs::InputIntoCanvas,
+            ),
+            (
+                "out",
+                PortKind::DeriveDestination,
+                CanvasExportAs::OutputOutOfCanvas,
+            ),
+        ]),
+    );
+    b.connect("pod-listen", "relay-listen");
+    b.connect("relay-destination", "import-into");
+    b.connect("import-out", "pod-destination");
+    b.canvas("sub");
+    b.node(
+        "into",
+        export_spec(PortKind::DeriveDestination, CanvasExportAs::InputIntoCanvas),
+        export_ports(PortKind::DeriveDestination, CanvasExportAs::InputIntoCanvas),
+    );
+    b.node(
+        "out",
+        export_spec(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+        export_ports(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+    );
+    b.connect("into-export", "out-export");
+    let problems = analyze(&b.build());
+    assert!(
+        errors(&problems).contains(&ProblemKind::Cycle),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn projection_reshapes_import_ports() {
+    use orchestration::services::topology::TopologyEdit;
+    let mut b = Builder::new("root");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+    b.node("pod", pod(&ip, 443), pod_ports());
+    b.node("entry", entry(None), entry_ports());
+    b.node(
+        "import",
+        import_spec("sub"),
+        import_ports(&[(
+            "out",
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        )]),
+    );
+    b.connect("pod-listen", "entry-listen");
+    b.connect("import-out", "pod-destination");
+    b.canvas("sub");
+    b.node(
+        "out",
+        export_spec(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+        export_ports(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+    );
+    let topology = b.build();
+    assert_eq!(topology.edges.len(), 2);
+
+    // The export goes away: its mirrored port and the edge on it go with it.
+    let projected = topology.project(&[
+        TopologyEdit::RetireNode {
+            node: ids::node_id("out"),
+        },
+        TopologyEdit::ReshapePorts {
+            node: ids::node_id("import"),
+            ports: vec![],
+        },
+    ]);
+    assert_eq!(projected.edges.len(), 1, "the dropped port took its edge");
+    assert!(
+        ensure_valid(&projected).is_ok(),
+        "{:?}",
+        analyze(&projected)
+    );
+
+    // A kept key keeps its row and edge, even when re-kinded.
+    let projected = topology.project(&[TopologyEdit::ReshapePorts {
+        node: ids::node_id("import"),
+        ports: vec![PortEntity {
+            id: port("import", "out"),
+            owner: ids::node_id("import"),
+            kind: PortKind::DeriveListen,
+            direction: PortDirection::Output,
+            key: "out".to_string(),
+            position: 0,
+        }],
+    }]);
+    assert_eq!(projected.edges.len(), 2, "the kept key kept its edge");
 }
 
 #[test]

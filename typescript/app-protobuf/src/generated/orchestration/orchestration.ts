@@ -365,10 +365,13 @@ export enum ProblemKind {
   POD_IP_FOREIGN = 9,
   EXIT_DESTINATION_INVALID = 10,
   IP_HASH_WITHOUT_CLIENT_IP = 11,
-  UNSUPPORTED_SPEC = 12,
   POD_PORT_UNCONNECTED = 13,
   RELAY_SAME_SERVER = 14,
   DISTRIBUTE_SINGLE_MEMBER = 15,
+  CANVAS_IMPORT_SELF = 16,
+  CANVAS_IMPORT_ANCESTOR = 17,
+  CANVAS_IMPORT_DUPLICATE = 18,
+  CANVAS_IMPORT_UNRESOLVED = 19,
   UNRECOGNIZED = -1,
 }
 
@@ -410,9 +413,6 @@ export function problemKindFromJSON(object: any): ProblemKind {
     case 11:
     case "IP_HASH_WITHOUT_CLIENT_IP":
       return ProblemKind.IP_HASH_WITHOUT_CLIENT_IP;
-    case 12:
-    case "UNSUPPORTED_SPEC":
-      return ProblemKind.UNSUPPORTED_SPEC;
     case 13:
     case "POD_PORT_UNCONNECTED":
       return ProblemKind.POD_PORT_UNCONNECTED;
@@ -422,6 +422,18 @@ export function problemKindFromJSON(object: any): ProblemKind {
     case 15:
     case "DISTRIBUTE_SINGLE_MEMBER":
       return ProblemKind.DISTRIBUTE_SINGLE_MEMBER;
+    case 16:
+    case "CANVAS_IMPORT_SELF":
+      return ProblemKind.CANVAS_IMPORT_SELF;
+    case 17:
+    case "CANVAS_IMPORT_ANCESTOR":
+      return ProblemKind.CANVAS_IMPORT_ANCESTOR;
+    case 18:
+    case "CANVAS_IMPORT_DUPLICATE":
+      return ProblemKind.CANVAS_IMPORT_DUPLICATE;
+    case 19:
+    case "CANVAS_IMPORT_UNRESOLVED":
+      return ProblemKind.CANVAS_IMPORT_UNRESOLVED;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -455,14 +467,20 @@ export function problemKindToJSON(object: ProblemKind): string {
       return "EXIT_DESTINATION_INVALID";
     case ProblemKind.IP_HASH_WITHOUT_CLIENT_IP:
       return "IP_HASH_WITHOUT_CLIENT_IP";
-    case ProblemKind.UNSUPPORTED_SPEC:
-      return "UNSUPPORTED_SPEC";
     case ProblemKind.POD_PORT_UNCONNECTED:
       return "POD_PORT_UNCONNECTED";
     case ProblemKind.RELAY_SAME_SERVER:
       return "RELAY_SAME_SERVER";
     case ProblemKind.DISTRIBUTE_SINGLE_MEMBER:
       return "DISTRIBUTE_SINGLE_MEMBER";
+    case ProblemKind.CANVAS_IMPORT_SELF:
+      return "CANVAS_IMPORT_SELF";
+    case ProblemKind.CANVAS_IMPORT_ANCESTOR:
+      return "CANVAS_IMPORT_ANCESTOR";
+    case ProblemKind.CANVAS_IMPORT_DUPLICATE:
+      return "CANVAS_IMPORT_DUPLICATE";
+    case ProblemKind.CANVAS_IMPORT_UNRESOLVED:
+      return "CANVAS_IMPORT_UNRESOLVED";
     case ProblemKind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -546,6 +564,11 @@ export interface Node {
   spec: NodeSpec | undefined;
   position: CanvasUiPosition | undefined;
   ports: Port[];
+  /**
+   * Set only for a canvas_import node: the canvas it embeds. An import node's
+   * ports mirror that canvas's export nodes (port key = export node id).
+   */
+  importTarget: Canvas | undefined;
 }
 
 export interface Edge {
@@ -620,6 +643,8 @@ export interface CreateCanvasReply {
 }
 
 export interface ListCanvasesRequest {
+  /** Subcanvases (canvases imported by another canvas) are omitted unless set. */
+  includeSubcanvases: boolean;
 }
 
 export interface ListCanvasesReply {
@@ -635,6 +660,22 @@ export interface GetCanvasReply {
   servers: Server[];
   nodes: Node[];
   edges: Edge[];
+  /** Root first, parent last; empty for a root canvas. */
+  ancestors: Canvas[];
+}
+
+/** Any canvas of the tree may be given; the reply is always the whole tree. */
+export interface GetCanvasTreeRequest {
+  canvasId: string;
+}
+
+export interface CanvasTreeNode {
+  canvas: Canvas | undefined;
+  children: CanvasTreeNode[];
+}
+
+export interface GetCanvasTreeReply {
+  root: CanvasTreeNode | undefined;
 }
 
 export interface UpdateCanvasRequest {
@@ -1989,7 +2030,16 @@ export const Port: MessageFns<Port> = {
 };
 
 function createBaseNode(): Node {
-  return { id: "", canvasId: "", name: "", comment: "", spec: undefined, position: undefined, ports: [] };
+  return {
+    id: "",
+    canvasId: "",
+    name: "",
+    comment: "",
+    spec: undefined,
+    position: undefined,
+    ports: [],
+    importTarget: undefined,
+  };
 }
 
 export const Node: MessageFns<Node> = {
@@ -2014,6 +2064,9 @@ export const Node: MessageFns<Node> = {
     }
     for (const v of message.ports) {
       Port.encode(v!, writer.uint32(58).fork()).join();
+    }
+    if (message.importTarget !== undefined) {
+      Canvas.encode(message.importTarget, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -2081,6 +2134,14 @@ export const Node: MessageFns<Node> = {
           message.ports.push(Port.decode(reader, reader.uint32()));
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.importTarget = Canvas.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2103,6 +2164,11 @@ export const Node: MessageFns<Node> = {
       spec: isSet(object.spec) ? NodeSpec.fromJSON(object.spec) : undefined,
       position: isSet(object.position) ? CanvasUiPosition.fromJSON(object.position) : undefined,
       ports: globalThis.Array.isArray(object?.ports) ? object.ports.map((e: any) => Port.fromJSON(e)) : [],
+      importTarget: isSet(object.importTarget)
+        ? Canvas.fromJSON(object.importTarget)
+        : isSet(object.import_target)
+        ? Canvas.fromJSON(object.import_target)
+        : undefined,
     };
   },
 
@@ -2129,6 +2195,9 @@ export const Node: MessageFns<Node> = {
     if (message.ports?.length) {
       obj.ports = message.ports.map((e) => Port.toJSON(e));
     }
+    if (message.importTarget !== undefined) {
+      obj.importTarget = Canvas.toJSON(message.importTarget);
+    }
     return obj;
   },
 
@@ -2146,6 +2215,9 @@ export const Node: MessageFns<Node> = {
       ? CanvasUiPosition.fromPartial(object.position)
       : undefined;
     message.ports = object.ports?.map((e) => Port.fromPartial(e)) || [];
+    message.importTarget = (object.importTarget !== undefined && object.importTarget !== null)
+      ? Canvas.fromPartial(object.importTarget)
+      : undefined;
     return message;
   },
 };
@@ -3253,11 +3325,14 @@ export const CreateCanvasReply: MessageFns<CreateCanvasReply> = {
 };
 
 function createBaseListCanvasesRequest(): ListCanvasesRequest {
-  return {};
+  return { includeSubcanvases: false };
 }
 
 export const ListCanvasesRequest: MessageFns<ListCanvasesRequest> = {
-  encode(_: ListCanvasesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(message: ListCanvasesRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.includeSubcanvases !== false) {
+      writer.uint32(8).bool(message.includeSubcanvases);
+    }
     return writer;
   },
 
@@ -3268,6 +3343,14 @@ export const ListCanvasesRequest: MessageFns<ListCanvasesRequest> = {
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.includeSubcanvases = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3277,20 +3360,30 @@ export const ListCanvasesRequest: MessageFns<ListCanvasesRequest> = {
     return message;
   },
 
-  fromJSON(_: any): ListCanvasesRequest {
-    return {};
+  fromJSON(object: any): ListCanvasesRequest {
+    return {
+      includeSubcanvases: isSet(object.includeSubcanvases)
+        ? globalThis.Boolean(object.includeSubcanvases)
+        : isSet(object.include_subcanvases)
+        ? globalThis.Boolean(object.include_subcanvases)
+        : false,
+    };
   },
 
-  toJSON(_: ListCanvasesRequest): unknown {
+  toJSON(message: ListCanvasesRequest): unknown {
     const obj: any = {};
+    if (message.includeSubcanvases !== false) {
+      obj.includeSubcanvases = message.includeSubcanvases;
+    }
     return obj;
   },
 
   create(base?: DeepPartial<ListCanvasesRequest>): ListCanvasesRequest {
     return ListCanvasesRequest.fromPartial(base ?? {});
   },
-  fromPartial(_: DeepPartial<ListCanvasesRequest>): ListCanvasesRequest {
+  fromPartial(object: DeepPartial<ListCanvasesRequest>): ListCanvasesRequest {
     const message = createBaseListCanvasesRequest();
+    message.includeSubcanvases = object.includeSubcanvases ?? false;
     return message;
   },
 };
@@ -3420,7 +3513,7 @@ export const GetCanvasRequest: MessageFns<GetCanvasRequest> = {
 };
 
 function createBaseGetCanvasReply(): GetCanvasReply {
-  return { canvas: undefined, servers: [], nodes: [], edges: [] };
+  return { canvas: undefined, servers: [], nodes: [], edges: [], ancestors: [] };
 }
 
 export const GetCanvasReply: MessageFns<GetCanvasReply> = {
@@ -3436,6 +3529,9 @@ export const GetCanvasReply: MessageFns<GetCanvasReply> = {
     }
     for (const v of message.edges) {
       Edge.encode(v!, writer.uint32(34).fork()).join();
+    }
+    for (const v of message.ancestors) {
+      Canvas.encode(v!, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -3479,6 +3575,14 @@ export const GetCanvasReply: MessageFns<GetCanvasReply> = {
           message.edges.push(Edge.decode(reader, reader.uint32()));
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.ancestors.push(Canvas.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3494,6 +3598,9 @@ export const GetCanvasReply: MessageFns<GetCanvasReply> = {
       servers: globalThis.Array.isArray(object?.servers) ? object.servers.map((e: any) => Server.fromJSON(e)) : [],
       nodes: globalThis.Array.isArray(object?.nodes) ? object.nodes.map((e: any) => Node.fromJSON(e)) : [],
       edges: globalThis.Array.isArray(object?.edges) ? object.edges.map((e: any) => Edge.fromJSON(e)) : [],
+      ancestors: globalThis.Array.isArray(object?.ancestors)
+        ? object.ancestors.map((e: any) => Canvas.fromJSON(e))
+        : [],
     };
   },
 
@@ -3511,6 +3618,9 @@ export const GetCanvasReply: MessageFns<GetCanvasReply> = {
     if (message.edges?.length) {
       obj.edges = message.edges.map((e) => Edge.toJSON(e));
     }
+    if (message.ancestors?.length) {
+      obj.ancestors = message.ancestors.map((e) => Canvas.toJSON(e));
+    }
     return obj;
   },
 
@@ -3525,6 +3635,211 @@ export const GetCanvasReply: MessageFns<GetCanvasReply> = {
     message.servers = object.servers?.map((e) => Server.fromPartial(e)) || [];
     message.nodes = object.nodes?.map((e) => Node.fromPartial(e)) || [];
     message.edges = object.edges?.map((e) => Edge.fromPartial(e)) || [];
+    message.ancestors = object.ancestors?.map((e) => Canvas.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseGetCanvasTreeRequest(): GetCanvasTreeRequest {
+  return { canvasId: "" };
+}
+
+export const GetCanvasTreeRequest: MessageFns<GetCanvasTreeRequest> = {
+  encode(message: GetCanvasTreeRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.canvasId !== "") {
+      writer.uint32(10).string(message.canvasId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetCanvasTreeRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetCanvasTreeRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.canvasId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetCanvasTreeRequest {
+    return {
+      canvasId: isSet(object.canvasId)
+        ? globalThis.String(object.canvasId)
+        : isSet(object.canvas_id)
+        ? globalThis.String(object.canvas_id)
+        : "",
+    };
+  },
+
+  toJSON(message: GetCanvasTreeRequest): unknown {
+    const obj: any = {};
+    if (message.canvasId !== "") {
+      obj.canvasId = message.canvasId;
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<GetCanvasTreeRequest>): GetCanvasTreeRequest {
+    return GetCanvasTreeRequest.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<GetCanvasTreeRequest>): GetCanvasTreeRequest {
+    const message = createBaseGetCanvasTreeRequest();
+    message.canvasId = object.canvasId ?? "";
+    return message;
+  },
+};
+
+function createBaseCanvasTreeNode(): CanvasTreeNode {
+  return { canvas: undefined, children: [] };
+}
+
+export const CanvasTreeNode: MessageFns<CanvasTreeNode> = {
+  encode(message: CanvasTreeNode, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.canvas !== undefined) {
+      Canvas.encode(message.canvas, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.children) {
+      CanvasTreeNode.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CanvasTreeNode {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCanvasTreeNode();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.canvas = Canvas.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.children.push(CanvasTreeNode.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): CanvasTreeNode {
+    return {
+      canvas: isSet(object.canvas) ? Canvas.fromJSON(object.canvas) : undefined,
+      children: globalThis.Array.isArray(object?.children)
+        ? object.children.map((e: any) => CanvasTreeNode.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: CanvasTreeNode): unknown {
+    const obj: any = {};
+    if (message.canvas !== undefined) {
+      obj.canvas = Canvas.toJSON(message.canvas);
+    }
+    if (message.children?.length) {
+      obj.children = message.children.map((e) => CanvasTreeNode.toJSON(e));
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<CanvasTreeNode>): CanvasTreeNode {
+    return CanvasTreeNode.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<CanvasTreeNode>): CanvasTreeNode {
+    const message = createBaseCanvasTreeNode();
+    message.canvas = (object.canvas !== undefined && object.canvas !== null)
+      ? Canvas.fromPartial(object.canvas)
+      : undefined;
+    message.children = object.children?.map((e) => CanvasTreeNode.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseGetCanvasTreeReply(): GetCanvasTreeReply {
+  return { root: undefined };
+}
+
+export const GetCanvasTreeReply: MessageFns<GetCanvasTreeReply> = {
+  encode(message: GetCanvasTreeReply, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.root !== undefined) {
+      CanvasTreeNode.encode(message.root, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetCanvasTreeReply {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetCanvasTreeReply();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.root = CanvasTreeNode.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): GetCanvasTreeReply {
+    return { root: isSet(object.root) ? CanvasTreeNode.fromJSON(object.root) : undefined };
+  },
+
+  toJSON(message: GetCanvasTreeReply): unknown {
+    const obj: any = {};
+    if (message.root !== undefined) {
+      obj.root = CanvasTreeNode.toJSON(message.root);
+    }
+    return obj;
+  },
+
+  create(base?: DeepPartial<GetCanvasTreeReply>): GetCanvasTreeReply {
+    return GetCanvasTreeReply.fromPartial(base ?? {});
+  },
+  fromPartial(object: DeepPartial<GetCanvasTreeReply>): GetCanvasTreeReply {
+    const message = createBaseGetCanvasTreeReply();
+    message.root = (object.root !== undefined && object.root !== null)
+      ? CanvasTreeNode.fromPartial(object.root)
+      : undefined;
     return message;
   },
 };
@@ -6674,6 +6989,14 @@ export const OrchestrationDefinition = {
       responseStream: false,
       options: {},
     },
+    getCanvasTree: {
+      name: "GetCanvasTree",
+      requestType: GetCanvasTreeRequest as typeof GetCanvasTreeRequest,
+      requestStream: false,
+      responseType: GetCanvasTreeReply as typeof GetCanvasTreeReply,
+      responseStream: false,
+      options: {},
+    },
     createServer: {
       name: "CreateServer",
       requestType: CreateServerRequest as typeof CreateServerRequest,
@@ -6839,6 +7162,10 @@ export interface OrchestrationServiceImplementation<CallContextExt = {}> {
     request: ValidateCanvasRequest,
     context: CallContext & CallContextExt,
   ): Promise<DeepPartial<ValidateCanvasReply>>;
+  getCanvasTree(
+    request: GetCanvasTreeRequest,
+    context: CallContext & CallContextExt,
+  ): Promise<DeepPartial<GetCanvasTreeReply>>;
   createServer(
     request: CreateServerRequest,
     context: CallContext & CallContextExt,
@@ -6920,6 +7247,10 @@ export interface OrchestrationClient<CallOptionsExt = {}> {
     request: DeepPartial<ValidateCanvasRequest>,
     options?: CallOptions & CallOptionsExt,
   ): Promise<ValidateCanvasReply>;
+  getCanvasTree(
+    request: DeepPartial<GetCanvasTreeRequest>,
+    options?: CallOptions & CallOptionsExt,
+  ): Promise<GetCanvasTreeReply>;
   createServer(
     request: DeepPartial<CreateServerRequest>,
     options?: CallOptions & CallOptionsExt,

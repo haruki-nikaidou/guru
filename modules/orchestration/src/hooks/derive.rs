@@ -1,10 +1,11 @@
 //! The derivation reactor: turns canvas edits into per-server config snapshots.
 //!
-//! Every mutating transaction bumps `orchestration_canvas.generation` and publishes
-//! [`CanvasDirty`]. This hook derives the whole canvas at the generation it read
-//! and commits only while the canvas is still at that generation, so a concurrent
-//! edit can never be overwritten by a stale pass — it just loses the race and the
-//! pass is redone.
+//! Every mutating transaction bumps the *root* canvas's `generation`
+//! (`fn::orchestration_touch`) and publishes [`CanvasDirty`]. This hook resolves
+//! the tree of whatever canvas it is asked about, derives the whole tree at the
+//! generation it read and commits only while the root is still at that
+//! generation, so a concurrent edit can never be overwritten by a stale pass — it
+//! just loses the race and the pass is redone.
 //!
 //! The message is a latency hint, not the contract: [`run_sweeper`] re-derives any
 //! canvas whose `generation` ran ahead of its `derived_generation`, so a dropped
@@ -112,7 +113,7 @@ impl Processor<DeriveCanvas> for CanvasDeriver {
             if self
                 .db
                 .process(CommitCanvasDerivation {
-                    canvas: input.canvas.clone(),
+                    canvas: state.root.clone(),
                     generation: state.generation,
                     updates,
                 })
@@ -120,7 +121,7 @@ impl Processor<DeriveCanvas> for CanvasDeriver {
             {
                 return Ok(());
             }
-            // The canvas moved under us: derive the newer state right away rather
+            // The tree moved under us: derive the newer state right away rather
             // than waiting for its own message.
         }
         tracing::warn!(canvas = ?input.canvas, "derivation kept losing the generation race");

@@ -142,23 +142,26 @@ impl Processor<FindServerConfigView> for SurrealProcessor {
     }
 }
 
+/// The config views of every server on the given canvases (a whole tree).
 #[derive(Debug)]
-pub struct ListServerConfigViewsByCanvas {
-    pub canvas: CanvasId,
+pub struct ListServerConfigViewsByCanvases {
+    pub canvases: Vec<CanvasId>,
 }
 
-impl Processor<ListServerConfigViewsByCanvas> for SurrealProcessor {
+impl Processor<ListServerConfigViewsByCanvases> for SurrealProcessor {
     type Output = Vec<ServerConfigViewEntity>;
     type Error = surrealdb::Error;
-    #[tracing::instrument(name = "Query:ListServerConfigViewsByCanvas", skip_all, err)]
+    #[tracing::instrument(name = "Query:ListServerConfigViewsByCanvases", skip_all, err)]
     async fn process(
         &self,
-        input: ListServerConfigViewsByCanvas,
+        input: ListServerConfigViewsByCanvases,
     ) -> Result<Self::Output, Self::Error> {
         let mut resp = self
             .db()
-            .query("SELECT * FROM orchestration_server_config_view WHERE server.canvas = $canvas")
-            .bind(("canvas", input.canvas))
+            .query(
+                "SELECT * FROM orchestration_server_config_view WHERE server.canvas IN $canvases",
+            )
+            .bind(("canvases", input.canvases))
             .await?;
         resp.take::<Vec<ServerConfigViewEntity>>(0)
     }
@@ -288,15 +291,18 @@ struct CanvasGenerations {
     derived_generation: i64,
 }
 
-/// Everything one derivation pass reads, in a single transaction.
+/// Everything one derivation pass reads, in a single transaction. The counters
+/// are the root's; the topology is the whole tree.
 #[derive(Debug, Clone)]
 pub struct DerivationInput {
+    pub root: CanvasId,
     pub generation: i64,
     pub derived_generation: i64,
     pub topology: CanvasTopology,
     pub views: Vec<ServerConfigViewEntity>,
 }
 
+/// Loads the derivation input of the tree containing `canvas`.
 pub struct LoadCanvasDerivationInput {
     pub canvas: CanvasId,
 }
@@ -307,7 +313,8 @@ impl Processor<LoadCanvasDerivationInput> for SurrealProcessor {
     type Error = surrealdb::Error;
     #[tracing::instrument(name = "Query-Transaction:LoadCanvasDerivationInput", skip_all, err)]
     async fn process(&self, input: LoadCanvasDerivationInput) -> Result<Self::Output, Self::Error> {
-        // Statement 0 is BEGIN; the reads start at statement 1.
+        // Statement 0 is BEGIN, 1-2 the LETs, 3 the root's counters, 4 the
+        // canvases, 5-9 the row reads, 10 the views, 11 the root.
         let mut resp = self
             .db()
             .query(include_str!(
@@ -315,21 +322,25 @@ impl Processor<LoadCanvasDerivationInput> for SurrealProcessor {
             ))
             .bind(("canvas", input.canvas.clone()))
             .await?;
-        let Some(generations) = resp.take::<Option<CanvasGenerations>>(1)? else {
+        let Some(generations) = resp.take::<Option<CanvasGenerations>>(3)? else {
             return Ok(None);
         };
-        let (servers, ips, nodes, edges) =
-            crate::entities::surreal::topology::group_rows(&mut resp, 2)?;
-        let views = resp.take::<Vec<ServerConfigViewEntity>>(7)?;
+        let root = resp
+            .take::<Option<CanvasId>>(11)?
+            .unwrap_or_else(|| input.canvas.clone());
+        let rows = crate::entities::surreal::topology::group_rows(&mut resp, 4, root.clone())?;
+        let views = resp.take::<Vec<ServerConfigViewEntity>>(10)?;
         Ok(Some(DerivationInput {
+            root: root.clone(),
             generation: generations.generation,
             derived_generation: generations.derived_generation,
             topology: CanvasTopology {
-                canvas: input.canvas,
-                servers,
-                ips,
-                nodes,
-                edges,
+                root,
+                canvases: rows.canvases,
+                servers: rows.servers,
+                ips: rows.ips,
+                nodes: rows.nodes,
+                edges: rows.edges,
             },
             views,
         }))
@@ -352,8 +363,8 @@ pub struct ViewUpdate {
     pub clear_failure: bool,
 }
 
-/// Commits a whole derivation pass, but only if the canvas is still at the
-/// generation it was derived from.
+/// Commits a whole derivation pass, but only if the root canvas is still at the
+/// generation it was derived from. `canvas` must be the tree's root.
 pub struct CommitCanvasDerivation {
     pub canvas: CanvasId,
     pub generation: i64,

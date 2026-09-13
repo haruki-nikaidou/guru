@@ -106,8 +106,8 @@ CREATE orchestration_node:dangling_ip CONTENT { canvas: orchestration_canvas:dan
 allow = false
 error_contains = "spec.config.ip"
 
-# An ip record that exists but belongs to another canvas is as unusable as a
-# missing one: derivation loads a single canvas.
+# An ip record outside the pod's canvas *tree* is as unusable as a missing one:
+# derivation loads one tree at a time.
 [[cases]]
 name = "pod_with_foreign_canvas_ip_is_rejected"
 kind = "sql_expect"
@@ -121,6 +121,82 @@ CREATE orchestration_node:scope_cross CONTENT { canvas: orchestration_canvas:sco
 """
 allow = false
 error_contains = "spec.config.ip"
+
+# A subcanvas may run a pod on a server of its parent: the tree is derived as a
+# whole, so the ip is resolvable.
+[[cases]]
+name = "pod_with_parent_tree_ip_is_accepted"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:tree_ip_root CONTENT { name: "root", description: "" };
+CREATE orchestration_canvas:tree_ip_sub CONTENT { name: "sub", description: "" };
+CREATE orchestration_node:tree_ip_import CONTENT { canvas: orchestration_canvas:tree_ip_root, name: "sub", comment: "", spec: { type: "canvas_import", config: { canvas: orchestration_canvas:tree_ip_sub } }, position: { x: 0, y: 0 } };
+CREATE orchestration_server:tree_ip_root CONTENT { canvas: orchestration_canvas:tree_ip_root, name: "s", icon: "", comment: "", position: { x: 0, y: 0 }, ipv6_resolve: "tolerated", log_level: "info" };
+CREATE server_ip_record:tree_ip_root CONTENT { server: orchestration_server:tree_ip_root, ip: "10.0.0.4", country: "JP" };
+CREATE orchestration_node:tree_ip_pod CONTENT { canvas: orchestration_canvas:tree_ip_sub, name: "pod", comment: "", spec: { type: "pod", config: { ip: server_ip_record:tree_ip_root, port: 8080 } }, position: { x: 0, y: 0 } };
+"""
+allow = true
+
+# The import index is UNIQUE on `spec.config.canvas`; every non-import node
+# stores NONE there and must not collide.
+[[cases]]
+name = "two_non_import_nodes_do_not_collide_on_the_import_index"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:no_collide CONTENT { name: "c", description: "" };
+CREATE orchestration_node:no_collide_a CONTENT { canvas: orchestration_canvas:no_collide, name: "a", comment: "", spec: { type: "exit", config: { destination: "a", udp_addr: NONE } }, position: { x: 0, y: 0 } };
+CREATE orchestration_node:no_collide_b CONTENT { canvas: orchestration_canvas:no_collide, name: "b", comment: "", spec: { type: "exit", config: { destination: "b", udp_addr: NONE } }, position: { x: 0, y: 0 } };
+"""
+allow = true
+
+[[cases]]
+name = "a_canvas_can_be_imported_once"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:once_a CONTENT { name: "a", description: "" };
+CREATE orchestration_canvas:once_b CONTENT { name: "b", description: "" };
+CREATE orchestration_canvas:once_sub CONTENT { name: "sub", description: "" };
+CREATE orchestration_node:once_a CONTENT { canvas: orchestration_canvas:once_a, name: "sub", comment: "", spec: { type: "canvas_import", config: { canvas: orchestration_canvas:once_sub } }, position: { x: 0, y: 0 } };
+CREATE orchestration_node:once_b CONTENT { canvas: orchestration_canvas:once_b, name: "sub", comment: "", spec: { type: "canvas_import", config: { canvas: orchestration_canvas:once_sub } }, position: { x: 0, y: 0 } };
+"""
+allow = false
+error_contains = "orchestration_node_import"
+
+[[cases]]
+name = "a_canvas_cannot_import_itself"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:selfish CONTENT { name: "c", description: "" };
+CREATE orchestration_node:selfish CONTENT { canvas: orchestration_canvas:selfish, name: "me", comment: "", spec: { type: "canvas_import", config: { canvas: orchestration_canvas:selfish } }, position: { x: 0, y: 0 } };
+"""
+allow = false
+error_contains = "spec.config.canvas"
+
+# Root, ancestors and tree are computed from the import nodes alone; the THROW
+# guards make the case fail on any wrong answer.
+[[cases]]
+name = "tree_functions_walk_import_nodes"
+kind = "sql_expect"
+actor = "root"
+sql = """
+CREATE orchestration_canvas:walk_root CONTENT { name: "root", description: "" };
+CREATE orchestration_canvas:walk_sub CONTENT { name: "sub", description: "" };
+CREATE orchestration_canvas:walk_subsub CONTENT { name: "subsub", description: "" };
+CREATE orchestration_node:walk_1 CONTENT { canvas: orchestration_canvas:walk_root, name: "sub", comment: "", spec: { type: "canvas_import", config: { canvas: orchestration_canvas:walk_sub } }, position: { x: 0, y: 0 } };
+CREATE orchestration_node:walk_2 CONTENT { canvas: orchestration_canvas:walk_sub, name: "subsub", comment: "", spec: { type: "canvas_import", config: { canvas: orchestration_canvas:walk_subsub } }, position: { x: 0, y: 0 } };
+IF fn::orchestration_root(orchestration_canvas:walk_subsub) != orchestration_canvas:walk_root { THROW "root" };
+IF fn::orchestration_root(orchestration_canvas:walk_root) != orchestration_canvas:walk_root { THROW "root of root" };
+IF fn::orchestration_ancestors(orchestration_canvas:walk_subsub, 0) != [orchestration_canvas:walk_sub, orchestration_canvas:walk_root] { THROW "ancestors" };
+IF fn::orchestration_tree(orchestration_canvas:walk_root, 0) != [orchestration_canvas:walk_root, orchestration_canvas:walk_sub, orchestration_canvas:walk_subsub] { THROW "tree" };
+fn::orchestration_touch(orchestration_canvas:walk_subsub);
+IF (SELECT VALUE generation FROM ONLY orchestration_canvas:walk_root) != 1 { THROW "touch root" };
+IF (SELECT VALUE generation FROM ONLY orchestration_canvas:walk_subsub) != 0 { THROW "touch subsub" };
+"""
+allow = true
 
 # Only a pod spec carries an `ip` key; an Entry, Exit or Relay node must stay
 # insertable with no `ip` at all, which is why `spec.config.ip` is optional and

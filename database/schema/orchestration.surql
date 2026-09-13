@@ -8,6 +8,12 @@
 -- `applied`). Derivation is fenced by the canvas generation counter: every
 -- mutating transaction bumps `generation`, and a derivation commits only while
 -- `generation` still equals the value it read, stamping `derived_generation`.
+--
+-- Canvases nest: a `canvas_import` node embeds another canvas as one node, and
+-- the unit of derivation is the whole tree. Only the *root* canvas of a tree
+-- carries a meaningful `generation`: every mutating transaction bumps the root
+-- (`fn::orchestration_touch`), and a subcanvas row keeps
+-- `generation == derived_generation`.
 
 DEFINE TABLE orchestration_canvas SCHEMAFULL;
 DEFINE FIELD name ON orchestration_canvas TYPE string;
@@ -50,8 +56,10 @@ DEFINE FIELD spec ON orchestration_node TYPE object FLEXIBLE;
 -- `orchestration_server_config_view` row. A dangling link has no server to
 -- attribute it to, making it the one derivation failure that can be neither
 -- published nor reported, so the database refuses to store one. The same applies
--- to an ip record in a different canvas: derivation loads one canvas at a time,
--- so a foreign link is indistinguishable from a missing one.
+-- to an ip record outside the pod's canvas tree: derivation loads one tree at a
+-- time, so a foreign link is indistinguishable from a missing one. A server
+-- anywhere in the tree is fine: a parent sees a child canvas as a black box, but
+-- the flattened graph is derived as a whole.
 --
 -- The path is `spec.config.ip`, not `spec.ip`: `NodeSpec` is a tagged enum
 -- (`#[surreal(tag = "type", content = "config")]`), so a pod row reads
@@ -60,10 +68,61 @@ DEFINE FIELD spec ON orchestration_node TYPE object FLEXIBLE;
 -- all, hence `option<...>` and the explicit `NONE` arm in the assertion.
 DEFINE FIELD spec.config.ip ON orchestration_node TYPE option<record<server_ip_record>>
     ASSERT $value == NONE
-        OR (record::exists($value) AND $value.server.canvas = $this.canvas);
+        OR (record::exists($value)
+            AND $value.server.canvas IN fn::orchestration_tree(fn::orchestration_root($this.canvas), 0));
 DEFINE FIELD position ON orchestration_node TYPE object;
 DEFINE FIELD position.x ON orchestration_node TYPE int;
 DEFINE FIELD position.y ON orchestration_node TYPE int;
+-- Nesting is stored only on the importing node (`spec.config.canvas`); root,
+-- ancestors and tree are computed. Recursive functions join the caller's
+-- transaction, so a mutating transaction can bump the root it belongs to at
+-- commit time rather than the root a service read a moment earlier.
+DEFINE FIELD spec.config.canvas ON orchestration_node TYPE option<record<orchestration_canvas>>
+    ASSERT $value == NONE OR (record::exists($value) AND $value != $this.canvas);
+-- A canvas is imported at most once. NONE (every non-import node) is not indexed.
+DEFINE INDEX orchestration_node_import ON orchestration_node FIELDS spec.config.canvas UNIQUE;
+
+-- [parent, grandparent, ..., root]; [] for a root.
+DEFINE FUNCTION fn::orchestration_ancestors($canvas: record<orchestration_canvas>, $depth: int) -> array<record<orchestration_canvas>> {
+    IF $depth > 32 { THROW "canvas nesting deeper than 32 levels" };
+    LET $parent = (SELECT VALUE canvas FROM orchestration_node WHERE spec.config.canvas = $canvas LIMIT 1)[0];
+    RETURN IF $parent == NONE { [] } ELSE { array::concat([$parent], fn::orchestration_ancestors($parent, $depth + 1)) };
+};
+DEFINE FUNCTION fn::orchestration_root($canvas: record<orchestration_canvas>) -> record<orchestration_canvas> {
+    LET $chain = fn::orchestration_ancestors($canvas, 0);
+    RETURN IF array::len($chain) > 0 { $chain[array::len($chain) - 1] } ELSE { $canvas };
+};
+-- The canvas and every canvas below it, depth-first, the given canvas first.
+DEFINE FUNCTION fn::orchestration_tree($canvas: record<orchestration_canvas>, $depth: int) -> array<record<orchestration_canvas>> {
+    IF $depth > 32 { THROW "canvas nesting deeper than 32 levels" };
+    LET $below = (SELECT VALUE fn::orchestration_tree(spec.config.canvas, $depth + 1)
+        FROM orchestration_node WHERE canvas = $canvas AND spec.config.canvas != NONE);
+    RETURN array::concat([$canvas], array::flatten($below));
+};
+-- Marks the tree containing $canvas as edited: only the root's generation counts.
+DEFINE FUNCTION fn::orchestration_touch($canvas: record<orchestration_canvas>) {
+    LET $root = fn::orchestration_root($canvas);
+    UPDATE $root SET generation += 1;
+};
+-- Reshapes a node's ports in place: a key that survives keeps its row (and its
+-- edges); a key that disappears loses its row and its edges. `$ports` elements
+-- are `{ kind, direction, key, position }` (the `NewPort` shape).
+DEFINE FUNCTION fn::orchestration_reshape_ports($node: record<orchestration_node>, $ports: array<object>) {
+    LET $keep = (SELECT VALUE key FROM $ports);
+    LET $gone = (SELECT VALUE id FROM orchestration_port WHERE owner = $node AND key NOT IN $keep);
+    DELETE orchestration_edge_connection WHERE in IN $gone OR out IN $gone;
+    DELETE orchestration_port WHERE id IN $gone;
+    FOR $p IN $ports {
+        LET $existing = (SELECT VALUE id FROM orchestration_port WHERE owner = $node AND key = $p.key);
+        IF array::len($existing) > 0 {
+            UPDATE $existing[0] SET kind = $p.kind, direction = $p.direction, position = $p.position;
+        } ELSE {
+            CREATE orchestration_port CONTENT {
+                owner: $node, kind: $p.kind, direction: $p.direction, key: $p.key, position: $p.position
+            };
+        };
+    };
+};
 DEFINE INDEX orchestration_node_canvas ON orchestration_node FIELDS canvas;
 
 DEFINE TABLE orchestration_port SCHEMAFULL;

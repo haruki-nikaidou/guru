@@ -2,18 +2,27 @@
 
 //! In-memory [`CanvasTopology`] builder for the pure topology/derive tests.
 
-use orchestration::entities::surreal::canvas::{CanvasId, CanvasUiPosition};
+use orchestration::entities::surreal::canvas::{CanvasEntity, CanvasId, CanvasUiPosition};
 use orchestration::entities::surreal::connection::{EdgeConnectionEntity, EdgeConnectionId};
-use orchestration::entities::surreal::node::{NodeEntity, NodeId, NodeSpec, NodeWithPorts};
+use orchestration::entities::surreal::node::{
+    CanvasExportAs, CanvasExportConfig, CanvasImportConfig, NodeEntity, NodeId, NodeSpec,
+    NodeWithPorts,
+};
 use orchestration::entities::surreal::port::{PortDirection, PortEntity, PortId, PortKind};
 use orchestration::entities::surreal::server::{
     ServerEntity, ServerId, ServerIpRecordEntity, ServerIpRecordId, ServerIpv6Resolve,
 };
 use orchestration::entities::surreal::topology::CanvasTopology;
+use orchestration::services::node::export_port_direction;
 use orchestration::utils::ids;
 
+/// Builds one canvas tree. `new(root)` starts on the root; `canvas(key)` adds a
+/// canvas (a stub row: nesting is expressed by import nodes alone) and makes it
+/// current for the `server`/`node` calls that follow.
 pub struct Builder {
-    canvas: CanvasId,
+    root: CanvasId,
+    canvases: Vec<CanvasEntity>,
+    current: CanvasId,
     servers: Vec<ServerEntity>,
     ips: Vec<ServerIpRecordEntity>,
     nodes: Vec<NodeWithPorts>,
@@ -107,10 +116,54 @@ pub fn aggregate_ports(copies: i64) -> Vec<PortSpec> {
     ports
 }
 
+/// The single port of an export node inside its canvas.
+pub fn export_ports(kind: PortKind, direction: CanvasExportAs) -> Vec<PortSpec> {
+    vec![spec("export", kind, export_port_direction(direction), 0)]
+}
+
+/// The derived ports of an import node: one per `(export node key, kind,
+/// direction)`, keyed by the export node's key (the builder uses keys as record
+/// ids), direction mirrored, position by index.
+pub fn import_ports(exports: &[(&str, PortKind, CanvasExportAs)]) -> Vec<PortSpec> {
+    exports
+        .iter()
+        .enumerate()
+        .map(|(i, (key, kind, direction))| {
+            let mirrored = match export_port_direction(*direction) {
+                PortDirection::Input => PortDirection::Output,
+                PortDirection::Output => PortDirection::Input,
+            };
+            spec(key, *kind, mirrored, i as i64)
+        })
+        .collect()
+}
+
+pub fn export_spec(kind: PortKind, direction: CanvasExportAs) -> NodeSpec {
+    NodeSpec::CanvasExport(CanvasExportConfig { kind, direction })
+}
+
+pub fn import_spec(canvas: &str) -> NodeSpec {
+    NodeSpec::CanvasImport(CanvasImportConfig {
+        canvas: ids::canvas_id(canvas),
+    })
+}
+
+fn stub_canvas(key: &str) -> CanvasEntity {
+    CanvasEntity {
+        id: ids::canvas_id(key),
+        name: key.to_string(),
+        description: String::new(),
+        generation: 0,
+        derived_generation: 0,
+    }
+}
+
 impl Builder {
     pub fn new(canvas: &str) -> Self {
         Self {
-            canvas: ids::canvas_id(canvas),
+            root: ids::canvas_id(canvas),
+            canvases: vec![stub_canvas(canvas)],
+            current: ids::canvas_id(canvas),
             servers: Vec::new(),
             ips: Vec::new(),
             nodes: Vec::new(),
@@ -118,11 +171,25 @@ impl Builder {
         }
     }
 
+    /// Switches the builder to `key`, adding the canvas on first use.
+    pub fn canvas(&mut self, key: &str) -> CanvasId {
+        let id = ids::canvas_id(key);
+        if !self
+            .canvases
+            .iter()
+            .any(|c| ids::record_key(&c.id.0) == key)
+        {
+            self.canvases.push(stub_canvas(key));
+        }
+        self.current = id.clone();
+        id
+    }
+
     pub fn server(&mut self, key: &str) -> ServerId {
         let id = ids::server_id(key);
         self.servers.push(ServerEntity {
             id: id.clone(),
-            canvas: self.canvas.clone(),
+            canvas: self.current.clone(),
             name: key.to_string(),
             icon: String::new(),
             comment: String::new(),
@@ -153,6 +220,15 @@ impl Builder {
         self.named_node(key, key, spec, ports)
     }
 
+    /// Like `node`, at a given y position (export ordering follows it).
+    pub fn node_at_y(&mut self, key: &str, spec: NodeSpec, ports: Vec<PortSpec>, y: i64) -> NodeId {
+        let id = self.named_node(key, key, spec, ports);
+        if let Some(n) = self.nodes.last_mut() {
+            n.node.position.y = y;
+        }
+        id
+    }
+
     pub fn named_node(
         &mut self,
         key: &str,
@@ -175,7 +251,7 @@ impl Builder {
         self.nodes.push(NodeWithPorts {
             node: NodeEntity {
                 id: id.clone(),
-                canvas: self.canvas.clone(),
+                canvas: self.current.clone(),
                 name: name.to_string(),
                 comment: String::new(),
                 spec,
@@ -212,13 +288,15 @@ impl Builder {
         id
     }
 
+    /// The current canvas.
     pub fn canvas_id(&self) -> CanvasId {
-        self.canvas.clone()
+        self.current.clone()
     }
 
     pub fn build(&self) -> CanvasTopology {
         CanvasTopology {
-            canvas: self.canvas.clone(),
+            root: self.root.clone(),
+            canvases: self.canvases.clone(),
             servers: self.servers.clone(),
             ips: self.ips.clone(),
             nodes: self.nodes.clone(),

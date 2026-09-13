@@ -45,8 +45,14 @@ pub enum CanvasExportAs {
     OutputOutOfCanvas,
 }
 
+/// An import node embeds another canvas as one node. The target is immutable:
+/// re-targeting is "retire and import again". The importing node's ports are
+/// derived from the target's export nodes (see
+/// [`crate::services::node::import_port_layout`]) and follow every export edit.
 #[derive(Debug, Clone, SurrealValue)]
-pub struct CanvasImportConfig {}
+pub struct CanvasImportConfig {
+    pub canvas: CanvasId,
+}
 
 #[derive(Debug, Clone, SurrealValue)]
 pub struct PodConfig {
@@ -161,6 +167,23 @@ pub struct NewPort {
     pub position: i64,
 }
 
+/// The importing node whose derived ports must follow this edit, and the port
+/// set it must end up with. `None` when the edited node is not an export node
+/// of an imported canvas.
+///
+/// Applied by `fn::orchestration_reshape_ports` in the same transaction as the
+/// export edit: a mirrored port whose key survives keeps its row and edges.
+#[derive(Debug, Clone, SurrealValue)]
+pub struct ImportSync {
+    pub node: NodeId,
+    pub ports: Vec<NewPort>,
+}
+
+/// The key `import_sync.ports` uses for the export node being created, whose
+/// record key only exists inside the transaction; `create_node_row.surql`
+/// substitutes the real key after the CREATE.
+pub const PENDING_EXPORT_KEY: &str = "pending-node";
+
 pub struct CreateNodeRow {
     pub canvas: CanvasId,
     pub name: String,
@@ -168,6 +191,7 @@ pub struct CreateNodeRow {
     pub spec: NodeSpec,
     pub position: CanvasUiPosition,
     pub ports: Vec<NewPort>,
+    pub import_sync: Option<ImportSync>,
 }
 
 impl Processor<CreateNodeRow> for SurrealProcessor {
@@ -183,7 +207,9 @@ impl Processor<CreateNodeRow> for SurrealProcessor {
         )
     )]
     async fn process(&self, input: CreateNodeRow) -> Result<Self::Output, Self::Error> {
-        // Statement 0 is BEGIN; the RETURN below is statement 4.
+        // Statement 0 is BEGIN, 1 the import guard, 2 the CREATE, 3 the port
+        // insert, 4 the import target write, 5 the import sync, 6 the touch; the
+        // RETURN is statement 7.
         let mut resp = self
             .db()
             .query(include_str!("../../../sql/node/create_node_row.surql"))
@@ -193,8 +219,9 @@ impl Processor<CreateNodeRow> for SurrealProcessor {
             .bind(("spec", input.spec))
             .bind(("position", input.position))
             .bind(("new_ports", input.ports))
+            .bind(("import_sync", input.import_sync))
             .await?;
-        resp.take::<Option<NodeWithPorts>>(4)?
+        resp.take::<Option<NodeWithPorts>>(7)?
             .ok_or_else(|| surrealdb::Error::internal("create node returned no row".to_string()))
     }
 }
@@ -243,6 +270,26 @@ impl Processor<FindNodeWithPorts> for SurrealProcessor {
     }
 }
 
+/// The node importing `canvas`, if any.
+#[derive(Debug)]
+pub struct FindImporterOf {
+    pub canvas: CanvasId,
+}
+
+impl Processor<FindImporterOf> for SurrealProcessor {
+    type Output = Option<NodeEntity>;
+    type Error = surrealdb::Error;
+    #[tracing::instrument(name = "Query:FindImporterOf", skip_all, err)]
+    async fn process(&self, input: FindImporterOf) -> Result<Self::Output, Self::Error> {
+        let mut resp = self
+            .db()
+            .query("SELECT * FROM orchestration_node WHERE spec.config.canvas = $canvas LIMIT 1")
+            .bind(("canvas", input.canvas))
+            .await?;
+        resp.take::<Option<NodeEntity>>(0)
+    }
+}
+
 /// Updates a node's editable metadata.
 ///
 /// `position` is only written when it is `Some`, so an edit that leaves the
@@ -255,6 +302,7 @@ pub struct UpdateNodeMetaRow {
     pub name: String,
     pub comment: String,
     pub position: Option<CanvasUiPosition>,
+    pub import_sync: Option<ImportSync>,
 }
 
 /// A node after a metadata update, plus whether the name actually changed.
@@ -270,7 +318,7 @@ impl Processor<UpdateNodeMetaRow> for SurrealProcessor {
     type Error = surrealdb::Error;
     #[tracing::instrument(name = "Query-Transaction:UpdateNodeMetaRow", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: UpdateNodeMetaRow) -> Result<Self::Output, Self::Error> {
-        // Statement 0 is BEGIN; the RETURN below is statement 5.
+        // Statement 0 is BEGIN, 1-5 the update steps; the RETURN is statement 6.
         let mut resp = self
             .db()
             .query(include_str!("../../../sql/node/update_node_meta_row.surql"))
@@ -279,8 +327,9 @@ impl Processor<UpdateNodeMetaRow> for SurrealProcessor {
             .bind(("name", input.name))
             .bind(("comment", input.comment))
             .bind(("position", input.position))
+            .bind(("import_sync", input.import_sync))
             .await?;
-        resp.take::<Option<NodeMetaUpdated>>(5)?
+        resp.take::<Option<NodeMetaUpdated>>(6)?
             .ok_or_else(|| surrealdb::Error::internal("node not found".to_string()))
     }
 }
@@ -295,6 +344,7 @@ pub struct UpdateNodeSpecRow {
     pub canvas: CanvasId,
     pub spec: NodeSpec,
     pub ports: Vec<NewPort>,
+    pub import_sync: Option<ImportSync>,
 }
 
 impl Processor<UpdateNodeSpecRow> for SurrealProcessor {
@@ -302,7 +352,8 @@ impl Processor<UpdateNodeSpecRow> for SurrealProcessor {
     type Error = surrealdb::Error;
     #[tracing::instrument(name = "Query-Transaction:UpdateNodeSpecRow", skip_all, err, fields(id = ?input.id))]
     async fn process(&self, input: UpdateNodeSpecRow) -> Result<Self::Output, Self::Error> {
-        // Statement 0 is BEGIN; the RETURN below is statement 6.
+        // Statement 0 is BEGIN, 1 the spec update, 2 the reshape, 3 the import
+        // sync, 4 the touch; the RETURN is statement 5.
         let mut resp = self
             .db()
             .query(include_str!("../../../sql/node/update_node_spec_row.surql"))
@@ -310,8 +361,9 @@ impl Processor<UpdateNodeSpecRow> for SurrealProcessor {
             .bind(("canvas", input.canvas))
             .bind(("spec", input.spec))
             .bind(("new_ports", input.ports))
+            .bind(("import_sync", input.import_sync))
             .await?;
-        resp.take::<Option<NodeWithPorts>>(6)?
+        resp.take::<Option<NodeWithPorts>>(5)?
             .ok_or_else(|| surrealdb::Error::internal("update node returned no row".to_string()))
     }
 }
@@ -320,6 +372,10 @@ impl Processor<UpdateNodeSpecRow> for SurrealProcessor {
 pub struct DeleteNodeRow {
     pub id: NodeId,
     pub canvas: CanvasId,
+    pub import_sync: Option<ImportSync>,
+    /// The canvas this node stops importing (set when it is an import node): it
+    /// becomes a root again and gets its own generation bump.
+    pub frees_canvas: Option<CanvasId>,
 }
 
 impl Processor<DeleteNodeRow> for SurrealProcessor {
@@ -331,6 +387,8 @@ impl Processor<DeleteNodeRow> for SurrealProcessor {
             .query(include_str!("../../../sql/node/delete_node_row.surql"))
             .bind(("id", input.id))
             .bind(("canvas", input.canvas))
+            .bind(("import_sync", input.import_sync))
+            .bind(("frees", input.frees_canvas))
             .await?
             .check()?;
         Ok(())

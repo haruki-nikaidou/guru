@@ -17,6 +17,6 @@ LET $ok = IF $error = NONE {
         SET in_flight = NONE, apply_error = $error, failed_revision = $revision
         WHERE server = $server AND in_flight.revision = $revision RETURN AFTER
 };
-IF array::len($ok) > 0 { UPDATE $canvas SET generation += 1 };
+IF array::len($ok) > 0 { fn::orchestration_touch($canvas) };
 RETURN array::len($ok) > 0;
 COMMIT TRANSACTION;

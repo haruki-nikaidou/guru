@@ -1,3 +1,5 @@
+-- `$canvas` is always the root of the derived tree.
+-- Statement 0 is BEGIN, 1 the LET, 2 the IF; the RETURN is statement 3.
 BEGIN TRANSACTION;
 -- `generation` fences against edits made since the pass read the canvas;
 -- `derived_generation < $generation` fences against a second pass that read the
@@ -26,6 +28,10 @@ IF array::len($fenced) > 0 {
                 WHERE server = $u.server
         };
     };
+    -- Subcanvas rows carry no generation of their own; keep them level so a
+    -- canvas that was imported mid-edit can never look stale on its own.
+    UPDATE orchestration_canvas SET derived_generation = generation
+        WHERE id IN fn::orchestration_tree($canvas, 0) AND id != $canvas;
 };
 RETURN array::len($fenced) > 0;
 COMMIT TRANSACTION;

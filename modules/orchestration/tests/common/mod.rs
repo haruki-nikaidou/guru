@@ -1,14 +1,27 @@
 #![allow(dead_code)]
 
+use auth::entities::surreal::account::{AccountId, AccountRole};
+use auth::services::identity::{Identity, IdentityKind};
 use kanau::processor::Processor;
-use orchestration::entities::surreal::canvas::{CanvasEntity, CanvasUiPosition, CreateCanvas};
+use orchestration::entities::surreal::canvas::{
+    CanvasEntity, CanvasId, CanvasUiPosition, CreateCanvas,
+};
 use orchestration::entities::surreal::node::{
     CreateNodeRow, NewPort, NodeSpec, NodeWithPorts, PodConfig,
 };
 use orchestration::entities::surreal::port::{PortDirection, PortKind};
 use orchestration::entities::surreal::server::{
-    CreateServer, CreateServerIp, ServerEntity, ServerIpRecordEntity, ServerIpv6Resolve,
+    CreateServer, CreateServerIp, ServerEntity, ServerId, ServerIpRecordEntity, ServerIpv6Resolve,
 };
+use orchestration::entities::surreal::view::{FindServerConfigView, ServerConfigViewEntity};
+use orchestration::hooks::derive::{CanvasDeriver, DeriveCanvas};
+use orchestration::services::agent::AgentService;
+use orchestration::services::canvas::CanvasService;
+use orchestration::services::edge::EdgeService;
+use orchestration::services::node::NodeService;
+use orchestration::services::rollout::RolloutService;
+use orchestration::services::server::ServerService;
+use surrealdb::types::RecordId;
 use wakuwaku::surreal::SurrealProcessor;
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -117,6 +130,7 @@ pub async fn node(
         spec,
         position: pos(0, 0),
         ports,
+        import_sync: None,
     })
     .await
 }
@@ -135,4 +149,107 @@ pub fn port_of(node: &NodeWithPorts, key: &str) -> orchestration::entities::surr
         .find(|p| p.key == key)
         .map(|p| p.id.clone())
         .unwrap_or_else(|| panic!("node has no port {key}"))
+}
+
+// --- service-level harness ---------------------------------------------------
+
+pub fn operator() -> Identity {
+    Identity {
+        account_id: AccountId(RecordId::new("auth_account", "admin")),
+        role: AccountRole::Admin,
+        kind: IdentityKind::Session,
+    }
+}
+
+pub fn machine() -> Identity {
+    Identity {
+        account_id: AccountId(RecordId::new("auth_account", "admin")),
+        role: AccountRole::Maintainer,
+        kind: IdentityKind::ApiKey,
+    }
+}
+
+/// A Maintainer holding a human session: it passes the `EditWorkspace` gate, so a
+/// refusal can only come from the role check itself.
+pub fn maintainer() -> Identity {
+    Identity {
+        account_id: AccountId(RecordId::new("auth_account", "ops")),
+        role: AccountRole::Maintainer,
+        kind: IdentityKind::Session,
+    }
+}
+
+pub fn pos0() -> CanvasUiPosition {
+    CanvasUiPosition { x: 0, y: 0 }
+}
+
+/// Every service over one in-memory database, plus the derivation hook.
+pub struct World {
+    pub db: SurrealProcessor,
+    pub canvases: CanvasService,
+    pub servers: ServerService,
+    pub nodes: NodeService,
+    pub edges: EdgeService,
+    pub agents: AgentService,
+    pub rollout: RolloutService,
+    pub deriver: CanvasDeriver,
+}
+
+pub async fn world() -> Result<World, Box<dyn std::error::Error>> {
+    let db = setup().await?;
+    Ok(World {
+        canvases: CanvasService {
+            db: db.clone(),
+            notifier: Default::default(),
+        },
+        servers: ServerService {
+            db: db.clone(),
+            notifier: Default::default(),
+        },
+        nodes: NodeService {
+            db: db.clone(),
+            notifier: Default::default(),
+        },
+        edges: EdgeService {
+            db: db.clone(),
+            notifier: Default::default(),
+        },
+        agents: AgentService {
+            db: db.clone(),
+            hub: Default::default(),
+            lease: Default::default(),
+            notifier: Default::default(),
+        },
+        rollout: RolloutService {
+            db: db.clone(),
+            notifier: Default::default(),
+        },
+        deriver: CanvasDeriver { db: db.clone() },
+        db,
+    })
+}
+
+impl World {
+    /// Runs a derivation pass the way the consumer or the sweeper would.
+    pub async fn derive(&self, canvas: &CanvasId) -> Result<(), Box<dyn std::error::Error>> {
+        self.deriver
+            .process(DeriveCanvas {
+                canvas: canvas.clone(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn view(
+        &self,
+        server: &ServerId,
+    ) -> Result<ServerConfigViewEntity, Box<dyn std::error::Error>> {
+        Ok(self
+            .db
+            .process(FindServerConfigView {
+                server: server.clone(),
+            })
+            .await?
+            .expect("every server has a config view"))
+    }
 }

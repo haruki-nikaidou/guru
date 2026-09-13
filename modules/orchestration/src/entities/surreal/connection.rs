@@ -34,7 +34,7 @@ impl Processor<ConnectPorts> for SurrealProcessor {
             .query(
                 "BEGIN TRANSACTION;
                  LET $edge = (RELATE ONLY $source->orchestration_edge_connection->$target);
-                 UPDATE $canvas SET generation += 1;
+                 fn::orchestration_touch($canvas);
                  RETURN $edge;
                  COMMIT TRANSACTION;",
             )
@@ -81,7 +81,7 @@ impl Processor<DeleteEdgeRow> for SurrealProcessor {
             .query(
                 "BEGIN TRANSACTION;
                  DELETE $id;
-                 UPDATE $canvas SET generation += 1;
+                 fn::orchestration_touch($canvas);
                  COMMIT TRANSACTION;",
             )
             .bind(("id", input.id))
