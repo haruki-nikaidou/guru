@@ -319,7 +319,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "argon2",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "base"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "amqprs",
  "bytes",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "guru-master"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "amqprs",
  "auth",
@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "guru-worker"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "auth",
  "chrono",
@@ -1970,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "guru_worker_config"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "compact_str",
  "serde",
@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "manage-tool"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "auth",
  "base",
@@ -3057,7 +3057,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "newtype_record_id"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 
 [[package]]
 name = "noisy_float"
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "amqprs",
  "bytes",
@@ -3427,7 +3427,7 @@ dependencies = [
 
 [[package]]
 name = "orchestration"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "amqprs",
  "auth",
@@ -4495,7 +4495,7 @@ checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
 
 [[package]]
 name = "rpguru_sdk"
-version = "0.1.0-alpha"
+version = "0.0.1-alpha"
 dependencies = [
  "prost",
  "tonic",

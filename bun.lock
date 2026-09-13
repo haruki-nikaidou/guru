@@ -10,7 +10,7 @@
     },
     "typescript/app-protobuf": {
       "name": "app-protobuf",
-      "version": "0.1.0-alpha",
+      "version": "0.0.1-alpha",
       "dependencies": {
         "@bufbuild/protobuf": "^2.12.0",
         "nice-grpc-common": "^2.0.3",
@@ -23,7 +23,7 @@
     },
     "typescript/guru-frontend": {
       "name": "guru-frontend",
-      "version": "0.0.1",
+      "version": "0.0.1-alpha",
       "dependencies": {
         "app-protobuf": "workspace:*",
         "nice-grpc": "^2.1.16",

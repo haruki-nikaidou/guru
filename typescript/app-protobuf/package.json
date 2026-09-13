@@ -1,6 +1,6 @@
 {
   "name": "app-protobuf",
-  "version": "0.1.0-alpha",
+  "version": "0.0.1-alpha",
   "private": true,
   "type": "module",
   "description": "Generated protobuf/gRPC TypeScript code, shared across the frontend packages.",

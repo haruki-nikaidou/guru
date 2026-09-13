@@ -1,6 +1,5 @@
 {
 	"name": "wakuwaku-template-workspace",
-	"version": "0.1.0-alpha",
 	"private": true,
 	"type": "module",
 	"workspaces": [

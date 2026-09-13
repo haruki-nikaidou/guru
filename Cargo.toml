@@ -14,7 +14,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha"
+# Versions are decoupled per component group; each crate declares its own:
+#   master side — bin/guru-master, bin/manage-tool, modules/*, lib/newtype_record_id
+#   API         — lib/rpguru_sdk, typescript/app-protobuf
+#   worker side — bin/guru-worker, lib/guru_worker_config
+#   frontend    — typescript/guru-frontend
 authors = []
 edition = "2024"
 license = "MIT"
