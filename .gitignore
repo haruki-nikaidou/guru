@@ -23,6 +23,8 @@ target
 # JavaScript / TypeScript (Bun workspace under typescript/)
 node_modules/
 .svelte-kit/
+.astro/
+dist/
 *.tsbuildinfo
 
 omp-session*

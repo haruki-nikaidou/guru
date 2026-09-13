@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Proxy Guru">
+	<rect width="32" height="32" rx="7" fill="#111111" />
+	<g fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round">
+		<path d="M6 10h7" />
+		<path d="M6 22h7" />
+		<path d="M13 10c6 0 0 12 6 12" />
+		<path d="M19 22h7" />
+	</g>
+	<circle cx="13" cy="10" r="2.4" fill="#ffffff" />
+	<circle cx="13" cy="22" r="2.4" fill="#ffffff" />
+	<circle cx="26" cy="22" r="2.4" fill="#ffffff" />
+</svg>

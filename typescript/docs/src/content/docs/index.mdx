@@ -1,0 +1,61 @@
+---
+title: Proxy Guru
+description: A managed TCP/TLS proxy fabric — design a topology on a canvas, ship one config per server.
+template: splash
+hero:
+  layout: centered-top
+  tagline: |
+    Operators design a topology on a canvas, the control plane derives one config per server from
+    it, and data-plane workers pick up every new revision automatically.
+  actions:
+    - text: Read the introduction
+      link: /guides/introduction/
+      icon: right-arrow
+    - text: Run it locally
+      link: /guides/local-development/
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+import { ContainerSection } from 'lucode-starlight/components';
+
+<ContainerSection width="xl">
+
+## Two planes, one model
+
+<CardGrid>
+	<Card title="Control plane" icon="setting">
+		`guru-master` serves the operator API, the worker API, the AMQP derivation hook and a cron
+		sweep — one binary, four modes.
+	</Card>
+	<Card title="Data plane" icon="rocket">
+		`guru-worker` terminates listeners and forwards traffic, either from a local TOML file or by
+		streaming configs from the master.
+	</Card>
+	<Card title="Convergent rollout" icon="approve-check">
+		Every server keeps `desired`, `in_flight` and `applied` snapshots, so no revision drops
+		traffic mid-rollout.
+	</Card>
+	<Card title="Everything is a Processor" icon="puzzle">
+		State plus an async function. Each query, operation and consumer is an input struct with one
+		`Processor` impl.
+	</Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+	<Card title="Guides" icon="open-book">
+		[Introduction](/guides/introduction/) ·
+		[Local Development](/guides/local-development/) ·
+		[Deployment](/guides/deployment/)
+	</Card>
+	<Card title="Reference" icon="list-format">
+		[Architecture](/reference/architecture/) ·
+		[Rollout Model](/reference/rollout/) ·
+		[Configuration](/reference/configuration/) ·
+		[Workspace Layout](/reference/workspace-layout/)
+	</Card>
+</CardGrid>
+
+</ContainerSection>

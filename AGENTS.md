@@ -209,6 +209,24 @@ workspace.
   import { GreeterDefinition } from "app-protobuf/sample/hello";
   ```
 
+### `docs` — the project manual
+
+`typescript/docs` is an Astro Starlight site themed with the
+[`lucode-starlight`](https://lucas-labs.github.io/lucode-starlight-theme/)
+plugin. Pages are Markdown/MDX under `src/content/docs/`, split into `guides/`
+(task-oriented) and `reference/` (lookup); the sidebar is declared in
+`astro.config.mjs`. Run it with `bun run docs:dev` and build it with
+`bun run docs:build`.
+
+`site` and `base` are deliberately unset: there is no docs deployment yet, so the
+site is portable and served from the root. When a target is chosen, set `site`
+(this also enables the sitemap Starlight currently skips) and, if it is hosted
+under a subpath, `base` — then prefix the root-relative links in
+`src/content/docs/` with it, since Starlight does not rewrite Markdown links.
+
+Document behaviour here, not in new top-level Markdown files — `README.md` stays
+a short overview and this file stays the code-organisation contract.
+
 ### Adding a frontend package
 
 1. Create it under `typescript/<name>/` with its own `package.json`; the Bun

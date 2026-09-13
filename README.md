@@ -59,6 +59,17 @@ selects the mode; `SURREALDB_NAMESPACE`, `SURREALDB_NAME` and `AMQP_URI` have no
 defaults). The frontend listens on `:3000` and reaches the control plane through
 `GURU_GRPC_URL`.
 
+## Documentation
+
+The full manual lives in `typescript/docs` — an Astro Starlight site themed with
+[`lucode-starlight`](https://lucas-labs.github.io/lucode-starlight-theme/):
+
+```sh
+bun install
+bun run docs:dev     # http://localhost:4321/
+bun run docs:build   # static output in typescript/docs/dist
+```
+
 ## Stack
 
 Rust 2024 on Tokio, [`wakuwaku`](https://crates.io/crates/wakuwaku) +

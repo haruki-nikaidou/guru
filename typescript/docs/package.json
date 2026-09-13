@@ -1,0 +1,22 @@
+{
+	"name": "guru-docs",
+	"private": true,
+	"version": "0.0.1-alpha",
+	"type": "module",
+	"scripts": {
+		"dev": "astro dev",
+		"build": "astro build",
+		"preview": "astro preview",
+		"check": "astro check"
+	},
+	"dependencies": {
+		"@astrojs/starlight": "^0.42.0",
+		"astro": "^7.3.2",
+		"lucode-starlight": "^1.0.0",
+		"sharp": "^0.35.4"
+	},
+	"devDependencies": {
+		"@astrojs/check": "^0.9.10",
+		"typescript": "^6"
+	}
+}
