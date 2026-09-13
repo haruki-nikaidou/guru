@@ -9,37 +9,15 @@
 //! TOML it receives (or loads from disk) into [`Config`], and `guru-master` derives a
 //! [`Config`] from a canvas and serializes it back to TOML.
 
+pub mod error;
+
 use compact_str::CompactString;
+pub use error::ConfigError;
 use serde::Deserializer;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-
-/// Everything that can go wrong while reading, validating or writing a config.
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("invalid remote '{0}': expected host:port")]
-    RemoteFormat(String),
-    #[error("invalid port in remote '{0}'")]
-    RemotePort(String),
-    #[error("duplicate listener {addr} ({tag})")]
-    DuplicateListener { addr: SocketAddr, tag: String },
-    #[error("forwarding {0} relay to tls/quic requires `sni`")]
-    MissingSni(String),
-    #[error("forwarding {0} has an empty load-balance group")]
-    EmptyLoadBalance(String),
-    #[error("read {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("parse toml: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("serialize toml: {0}")]
-    Serialize(#[from] toml::ser::Error),
-}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,27 +333,34 @@ impl Forwarding {
     /// entry can attribute a failure to the entry that caused it instead of
     /// rejecting the whole file.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if let ForwardingTo::Relay { protocol, sni, .. } = &self.to {
-            let needs = matches!(protocol, RelayProtocol::TlsOverTcp | RelayProtocol::Quic);
-            if needs && sni.is_none() {
-                return Err(ConfigError::MissingSni(self.tag.clone()));
-            }
-        }
-        reject_empty(&self.to, &self.tag)
+        validate_to(&self.to, &self.tag)
     }
 }
 
-/// Rejects load-balance groups (including nested ones) that have no members.
-fn reject_empty(to: &ForwardingTo, tag: &str) -> Result<(), ConfigError> {
-    if let ForwardingTo::LoadBalance(g) = to {
-        if g.empty_members() {
-            return Err(ConfigError::EmptyLoadBalance(tag.to_string()));
+/// The per-destination rules, applied to every node of the [`ForwardingTo`] tree:
+/// a relay over tls/quic needs an `sni`, and a load-balance group needs members.
+/// Both live in this one traversal so a rule cannot be enforced at the top level
+/// and silently skipped for nested members.
+fn validate_to(to: &ForwardingTo, tag: &str) -> Result<(), ConfigError> {
+    match to {
+        ForwardingTo::Exit { .. } => Ok(()),
+        ForwardingTo::Relay { protocol, sni, .. } => {
+            let needs = matches!(protocol, RelayProtocol::TlsOverTcp | RelayProtocol::Quic);
+            if needs && sni.is_none() {
+                return Err(ConfigError::MissingSni(tag.to_string()));
+            }
+            Ok(())
         }
-        for m in &g.members {
-            reject_empty(m, tag)?;
+        ForwardingTo::LoadBalance(g) => {
+            if g.empty_members() {
+                return Err(ConfigError::EmptyLoadBalance(tag.to_string()));
+            }
+            for m in &g.members {
+                validate_to(m, tag)?;
+            }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -498,5 +483,72 @@ mod tests {
         let text = cfg.to_toml_string().unwrap();
         let parsed = Config::from_toml_str(&text).unwrap();
         assert_eq!(parsed, cfg, "round-trip mismatch; emitted:\n{text}");
+    }
+
+    fn lb(strategy: LoadBalanceStrategy, members: SmallVec<[ForwardingTo; 4]>) -> ForwardingTo {
+        ForwardingTo::LoadBalance(Box::new(LoadBalanceGroup { strategy, members }))
+    }
+
+    fn forwarding(to: ForwardingTo) -> Forwarding {
+        Forwarding {
+            tag: "nested".to_string(),
+            listen: "203.0.113.10:443".parse().unwrap(),
+            receive_proxy_protocol: None,
+            listen_as: ListenAs::Raw,
+            to,
+        }
+    }
+
+    fn relay(protocol: RelayProtocol, sni: Option<&str>) -> ForwardingTo {
+        ForwardingTo::Relay {
+            protocol,
+            destination: Remote::parse("relay.internal:9000").unwrap(),
+            sni: sni.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn nested_tls_relay_without_sni_is_rejected() {
+        let one_level = forwarding(lb(
+            LoadBalanceStrategy::RoundRobin,
+            smallvec::smallvec![relay(RelayProtocol::TlsOverTcp, None)],
+        ));
+        assert!(matches!(
+            one_level.validate(),
+            Err(ConfigError::MissingSni(tag)) if tag == "nested"
+        ));
+
+        let two_levels = forwarding(lb(
+            LoadBalanceStrategy::Fallback,
+            smallvec::smallvec![
+                relay(RelayProtocol::Tcp, None),
+                lb(
+                    LoadBalanceStrategy::RoundRobin,
+                    smallvec::smallvec![
+                        relay(RelayProtocol::TlsOverTcp, Some("ok.example.com")),
+                        relay(RelayProtocol::Quic, None),
+                    ],
+                ),
+            ],
+        ));
+        assert!(matches!(
+            two_levels.validate(),
+            Err(ConfigError::MissingSni(tag)) if tag == "nested"
+        ));
+    }
+
+    #[test]
+    fn nested_relays_with_sni_are_accepted() {
+        let ok = forwarding(lb(
+            LoadBalanceStrategy::Fallback,
+            smallvec::smallvec![lb(
+                LoadBalanceStrategy::RoundRobin,
+                smallvec::smallvec![
+                    relay(RelayProtocol::Quic, Some("a.example.com")),
+                    relay(RelayProtocol::Tcp, None),
+                ],
+            )],
+        ));
+        assert!(ok.validate().is_ok());
     }
 }
