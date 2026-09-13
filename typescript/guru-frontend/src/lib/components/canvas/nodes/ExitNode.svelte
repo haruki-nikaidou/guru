@@ -23,7 +23,7 @@ let { id, data }: NodeProps & { data: Extract<FlowNodeData, { kind: 'exit' }> } 
 	</p>
 	<div class="mt-1">
 		{#each data.node.ports as port (port.id)}
-			<PortHandle {port} label={portLabel(port.key)} />
+			<PortHandle {port} label={portLabel(port)} />
 		{/each}
 	</div>
 </NodeShell>

@@ -1,6 +1,9 @@
 import type { Connection, Edge, Node } from '@xyflow/svelte';
 import type {
+	CanvasExportNodeDto,
 	CanvasGraph,
+	CanvasImportNodeDto,
+	CanvasPort,
 	EntryNodeDto,
 	ExitNodeDto,
 	LoadBalanceNodeDto,
@@ -20,7 +23,9 @@ export type FlowNodeData =
 	| { kind: 'entry'; node: EntryNodeDto; problem: ProblemLevel }
 	| { kind: 'relay'; node: RelayNodeDto; problem: ProblemLevel }
 	| { kind: 'exit'; node: ExitNodeDto; problem: ProblemLevel }
-	| { kind: 'load_balance'; node: LoadBalanceNodeDto; problem: ProblemLevel };
+	| { kind: 'load_balance'; node: LoadBalanceNodeDto; problem: ProblemLevel }
+	| { kind: 'canvas_import'; node: CanvasImportNodeDto; problem: ProblemLevel }
+	| { kind: 'canvas_export'; node: CanvasExportNodeDto; problem: ProblemLevel };
 
 export type FlowNode = Node<FlowNodeData>;
 export type PortIndexEntry = {
@@ -47,6 +52,10 @@ export type ForceTarget = {
 	id: string;
 	label: string;
 	message: string;
+	/** An import node: forcing it also frees the canvas it embedded. */
+	subcanvasTarget?: string;
+	/** An export node: forcing it reshapes the parent's import node. */
+	boundary?: boolean;
 };
 
 /** `error` beats `warning` beats `none`; a server inherits its pods' problems. */
@@ -93,7 +102,11 @@ export function buildFlowNodes(graph: CanvasGraph): FlowNode[] {
 						? 'relay'
 						: node.kind === 'exit'
 							? 'exit'
-							: 'loadBalance',
+							: node.kind === 'canvas_import'
+								? 'canvasImport'
+								: node.kind === 'canvas_export'
+									? 'canvasExport'
+									: 'loadBalance',
 			position: { x: node.x, y: node.y },
 			// The union is discriminated by the same `kind` the DTO carries.
 			data: { kind: node.kind, node, problem } as FlowNodeData
@@ -299,14 +312,16 @@ export function canConnect(
 }
 
 /**
- * The label of a port row. Only the two shared keys are translated; the
- * load-balance keys (`member_0`, `copy_0`, `source`) are shown verbatim because
- * they are the identifiers the control plane derives them as.
+ * The label of a port row. An import port carries the name of the export node
+ * it mirrors; only the two shared keys are translated, and the load-balance
+ * keys (`member_0`, `copy_0`, `source`) are shown verbatim because they are the
+ * identifiers the control plane derives them as.
  */
-export function portLabel(key: string): string {
-	if (key === 'listen') return m.editor_port_listen();
-	if (key === 'destination') return m.editor_port_destination();
-	return key;
+export function portLabel(port: CanvasPort): string {
+	if (port.label !== null) return port.label;
+	if (port.key === 'listen') return m.editor_port_listen();
+	if (port.key === 'destination') return m.editor_port_destination();
+	return port.key;
 }
 
 /**

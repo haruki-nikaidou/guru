@@ -1,4 +1,4 @@
-import type { CanvasProblem } from '#lib/dto/canvas.js';
+import type { CanvasOption, CanvasProblem } from '#lib/dto/canvas.js';
 
 /**
  * The canvas editor's view of a topology. Protobuf never reaches the client:
@@ -11,6 +11,12 @@ export type ProxyProtocolName = 'none' | 'v1' | 'v2';
 export type RelayProtocolName = 'tcp_raw' | 'tcp_tls' | 'quic';
 export type LoadBalanceModeName = 'round_robin' | 'random' | 'ip_hash' | 'fallback';
 export type Ipv6ResolveName = 'required' | 'preferred' | 'tolerated' | 'forbidden';
+/**
+ * Which side of the boundary an export node feeds, named from the subcanvas's
+ * point of view: `input_into_canvas` emits inside, so the mirrored port on the
+ * importer is an input.
+ */
+export type CanvasExportAsName = 'input_into_canvas' | 'output_out_of_canvas';
 
 export type CanvasPort = {
 	id: string;
@@ -19,6 +25,12 @@ export type CanvasPort = {
 	/** Derived server-side (`port_layout`); the client never invents one. */
 	key: string;
 	position: number;
+	/**
+	 * An import port is keyed by the record id of the export node it mirrors,
+	 * which is meaningless on screen: the label is that export node's name,
+	 * resolved from the target canvas. `null` for every other port.
+	 */
+	label: string | null;
 };
 
 type NodeBase = {
@@ -64,7 +76,29 @@ export type LoadBalanceNodeDto = NodeBase & {
 	balanceMode: LoadBalanceModeName;
 	memberCount: number;
 };
-export type StandaloneNode = EntryNodeDto | RelayNodeDto | ExitNodeDto | LoadBalanceNodeDto;
+/**
+ * Embeds another canvas as one node. Its ports mirror the target's export
+ * nodes and are derived server-side; the target itself is immutable.
+ */
+export type CanvasImportNodeDto = NodeBase & {
+	kind: 'canvas_import';
+	targetCanvasId: string;
+	/** Empty when the target was deleted out from under the import. */
+	targetName: string;
+};
+/** One boundary port of the canvas it sits on, seen as a port on the importer. */
+export type CanvasExportNodeDto = NodeBase & {
+	kind: 'canvas_export';
+	portKind: PortKindName;
+	exportAs: CanvasExportAsName;
+};
+export type StandaloneNode =
+	| EntryNodeDto
+	| RelayNodeDto
+	| ExitNodeDto
+	| LoadBalanceNodeDto
+	| CanvasImportNodeDto
+	| CanvasExportNodeDto;
 
 export type PodDto = {
 	id: string;
@@ -104,4 +138,6 @@ export type CanvasGraph = {
 	problems: TopologyProblem[];
 	/** Pods whose `ipRecordId` resolves to no server ip on this canvas. */
 	orphanPods: PodDto[];
+	/** Root first, parent last; empty when this canvas is a root. */
+	ancestors: CanvasOption[];
 };

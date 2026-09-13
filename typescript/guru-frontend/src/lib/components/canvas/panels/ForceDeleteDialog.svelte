@@ -23,7 +23,13 @@ async function force() {
 			} else if (target.kind === 'server') {
 				await deleteServerNode({ canvasId, serverId: target.id, force: true });
 			} else {
-				await deleteNode({ canvasId, nodeId: target.id, force: true });
+				await deleteNode({
+					canvasId,
+					nodeId: target.id,
+					force: true,
+					subcanvasTarget: target.subcanvasTarget ?? '',
+					boundary: target.boundary ?? false
+				});
 			}
 		}
 		targets = [];

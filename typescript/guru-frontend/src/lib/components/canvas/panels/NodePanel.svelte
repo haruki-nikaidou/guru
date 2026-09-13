@@ -5,6 +5,8 @@ import { Badge } from '#lib/components/ui/badge/index.js';
 import { Button } from '#lib/components/ui/button/index.js';
 import type { CanvasGraph } from '#lib/dto/topology.js';
 import { m } from '#lib/paraglide/messages.js';
+import CanvasExportForm from './CanvasExportForm.svelte';
+import CanvasImportForm from './CanvasImportForm.svelte';
 import EntryForm from './EntryForm.svelte';
 import ExitForm from './ExitForm.svelte';
 import LoadBalanceForm from './LoadBalanceForm.svelte';
@@ -47,11 +49,15 @@ const kindLabel = $derived(
 				? m.editor_kind_relay()
 				: node?.kind === 'exit'
 					? m.editor_kind_exit()
-					: node?.kind === 'load_balance'
-						? node.mode === 'distribute'
-							? m.editor_kind_lb_distribute()
-							: m.editor_kind_lb_aggregate()
-						: ''
+					: node?.kind === 'canvas_import'
+						? m.editor_kind_subcanvas()
+						: node?.kind === 'canvas_export'
+							? m.editor_kind_export()
+							: node?.kind === 'load_balance'
+								? node.mode === 'distribute'
+									? m.editor_kind_lb_distribute()
+									: m.editor_kind_lb_aggregate()
+								: ''
 );
 </script>
 
@@ -82,6 +88,10 @@ const kindLabel = $derived(
 			<ExitForm {canvasId} {node} {editable} />
 		{:else if node?.kind === 'load_balance'}
 			<LoadBalanceForm {canvasId} {node} {editable} />
+		{:else if node?.kind === 'canvas_import'}
+			<CanvasImportForm {canvasId} {node} {editable} />
+		{:else if node?.kind === 'canvas_export'}
+			<CanvasExportForm {canvasId} {node} {editable} />
 		{/if}
 	</div>
 </div>

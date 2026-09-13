@@ -1,8 +1,10 @@
 import type {
+	CanvasTreeNode as ProtoCanvasTreeNode,
 	Node as ProtoNode,
 	Server as ProtoServer
 } from 'app-protobuf/orchestration/orchestration';
 import {
+	CanvasExportAs,
 	Ipv6Resolve,
 	LoadBalanceMode,
 	PortDirection,
@@ -13,7 +15,9 @@ import {
 	RelayProtocol
 } from 'app-protobuf/orchestration/orchestration';
 import * as v from 'valibot';
+import type { CanvasOption } from '#lib/dto/canvas.js';
 import type {
+	CanvasExportAsName,
 	CanvasGraph,
 	CanvasPort,
 	Ipv6ResolveName,
@@ -31,6 +35,11 @@ import { callGrpc } from '#lib/server/errors.js';
 import { orchestrationClient } from '#lib/server/grpc.js';
 import { requireSessionId, sessionMetadata } from '#lib/server/session.js';
 import { command, query } from '$app/server';
+import {
+	getCanvasTrail,
+	listCanvases,
+	listCanvasOptions
+} from '../../../(home)/canvases.remote.js';
 
 // The control plane is authoritative on permissions: no role check happens here.
 const idSchema = v.pipe(v.string(), v.minLength(1, 'id_required'));
@@ -167,14 +176,18 @@ const toPortKind = (value: PortKind): PortKindName =>
 const toPortDirection = (value: PortDirection): PortDirectionName =>
 	value === PortDirection.PORT_OUTPUT ? 'output' : 'input';
 
-const toPorts = (node: ProtoNode): CanvasPort[] =>
+/** Shared by every node whose ports carry no derived label. */
+const NO_LABELS: ReadonlyMap<string, string> = new Map();
+
+const toPorts = (node: ProtoNode, labels: ReadonlyMap<string, string>): CanvasPort[] =>
 	node.ports
 		.map(port => ({
 			id: port.id,
 			kind: toPortKind(port.kind),
 			direction: toPortDirection(port.direction),
 			key: port.key,
-			position: Number(port.position)
+			position: Number(port.position),
+			label: labels.get(port.key) ?? null
 		}))
 		.sort((a, b) => a.position - b.position);
 
@@ -207,11 +220,18 @@ const toPod = (node: ProtoNode, ipRecordId: string, port: number): PodDto => ({
 	comment: node.comment,
 	ipRecordId,
 	port,
-	ports: toPorts(node)
+	ports: toPorts(node, NO_LABELS)
 });
 
-/** A standalone node, or `null` for a pod / an unsupported spec. */
-function toStandalone(node: ProtoNode): StandaloneNode | null {
+/**
+ * A standalone node, or `null` for a pod / an unsupported spec. `exportNames`
+ * maps the export node ids of an import target to their names, which is what
+ * the mirrored ports are keyed by.
+ */
+function toStandalone(
+	node: ProtoNode,
+	exportNames: ReadonlyMap<string, string>
+): StandaloneNode | null {
 	const spec = node.spec;
 	const base = {
 		id: node.id,
@@ -219,7 +239,7 @@ function toStandalone(node: ProtoNode): StandaloneNode | null {
 		comment: node.comment,
 		x: Number(node.position?.x ?? 0n),
 		y: Number(node.position?.y ?? 0n),
-		ports: toPorts(node)
+		ports: toPorts(node, exportNames)
 	};
 	if (spec?.entry) {
 		const tls = spec.entry.tls;
@@ -273,6 +293,26 @@ function toStandalone(node: ProtoNode): StandaloneNode | null {
 			memberCount: base.ports.filter(port => port.key.startsWith('copy_')).length
 		};
 	}
+	if (spec?.canvasImport) {
+		return {
+			...base,
+			kind: 'canvas_import',
+			targetCanvasId: spec.canvasImport.canvasId,
+			// Unset when the target is gone: `CANVAS_IMPORT_UNRESOLVED` says so.
+			targetName: node.importTarget?.name ?? ''
+		};
+	}
+	if (spec?.canvasExport) {
+		return {
+			...base,
+			kind: 'canvas_export',
+			portKind: toPortKind(spec.canvasExport.kind),
+			exportAs:
+				spec.canvasExport.direction === CanvasExportAs.INPUT_INTO_CANVAS
+					? 'input_into_canvas'
+					: 'output_out_of_canvas'
+		};
+	}
 	return null;
 }
 
@@ -308,6 +348,35 @@ export const getCanvasGraph = query(
 			for (const ip of server.ips) serverByIpRecord.set(ip.id, server.id);
 		}
 
+		// An import node's ports are keyed by the record id of the export node
+		// they mirror, which is unreadable on screen: the names live on the target
+		// canvas, so each distinct target is read once for them.
+		const exportNames = new Map<string, Map<string, string>>();
+		await Promise.all(
+			[
+				...new Set(
+					detail.nodes.flatMap(node =>
+						node.spec?.canvasImport ? [node.spec.canvasImport.canvasId] : []
+					)
+				)
+			].map(async targetId => {
+				try {
+					const target = await orchestrationClient().getCanvas(
+						{ canvasId: targetId },
+						{ metadata }
+					);
+					const names = new Map<string, string>();
+					for (const node of target.nodes) {
+						if (node.spec?.canvasExport) names.set(node.id, node.name);
+					}
+					exportNames.set(targetId, names);
+				} catch {
+					// A target that vanished is `CANVAS_IMPORT_UNRESOLVED` in the
+					// problems panel; its ports simply keep their raw keys.
+				}
+			})
+		);
+
 		const podsByServer = new Map<string, PodDto[]>();
 		const orphanPods: PodDto[] = [];
 		const nodes: StandaloneNode[] = [];
@@ -325,7 +394,11 @@ export const getCanvasGraph = query(
 				else podsByServer.set(serverId, [dto]);
 				continue;
 			}
-			const standalone = toStandalone(node);
+			const target = node.spec?.canvasImport?.canvasId;
+			const standalone = toStandalone(
+				node,
+				(target === undefined ? undefined : exportNames.get(target)) ?? NO_LABELS
+			);
 			if (standalone) nodes.push(standalone);
 		}
 
@@ -343,7 +416,12 @@ export const getCanvasGraph = query(
 				targetPortId: edge.targetPortId
 			})),
 			problems: validation.problems.map(toProblem),
-			orphanPods
+			orphanPods,
+			ancestors: detail.ancestors.map(canvas => ({
+				id: canvas.id,
+				name: canvas.name,
+				description: canvas.description
+			}))
 		};
 	}
 );
@@ -518,6 +596,240 @@ export const createStandaloneNode = command(
 	}
 );
 
+const portKindSchema = v.picklist(['derive_listen', 'derive_destination'] as const);
+const exportAsSchema = v.picklist(['input_into_canvas', 'output_out_of_canvas'] as const);
+
+const fromPortKind = (value: PortKindName): PortKind =>
+	value === 'derive_listen' ? PortKind.DERIVE_LISTEN : PortKind.DERIVE_DESTINATION;
+const fromExportAs = (value: CanvasExportAsName): CanvasExportAs =>
+	value === 'input_into_canvas'
+		? CanvasExportAs.INPUT_INTO_CANVAS
+		: CanvasExportAs.OUTPUT_OUT_OF_CANVAS;
+
+/** Every canvas id of the tree `node` roots. */
+function treeCanvasIds(node: ProtoCanvasTreeNode | undefined, into: Set<string>) {
+	if (!node) return;
+	if (node.canvas) into.add(node.canvas.id);
+	for (const child of node.children) treeCanvasIds(child, into);
+}
+
+/**
+ * What this canvas may embed: root canvases outside its own tree. A canvas of
+ * the same tree would be a self, ancestor or duplicate import, all of which the
+ * control plane refuses; a canvas that is already imported elsewhere is not a
+ * root, so it never appears here.
+ */
+export const listImportableCanvases = query(
+	v.object({ canvasId: idSchema }),
+	async ({ canvasId }): Promise<CanvasOption[]> => {
+		const metadata = sessionMetadata(requireSessionId());
+		const [roots, tree] = await callGrpc(() =>
+			Promise.all([
+				orchestrationClient().listCanvases({ includeSubcanvases: false }, { metadata }),
+				orchestrationClient().getCanvasTree({ canvasId }, { metadata })
+			])
+		);
+		const own = new Set<string>();
+		treeCanvasIds(tree.root, own);
+		return roots.canvases
+			.filter(canvas => !own.has(canvas.id))
+			.map(canvas => ({ id: canvas.id, name: canvas.name, description: canvas.description }))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+);
+
+/**
+ * Which canvas of this tree owns `nodeId`. Topology problems are reported for
+ * the flattened tree, so a problem opened on one canvas can name a node that
+ * lives in another; this is how the editor finds where to go. Empty when the
+ * node is nowhere in the tree.
+ */
+export const locateNodeCanvas = query(
+	v.object({ canvasId: idSchema, nodeId: idSchema }),
+	async ({ canvasId, nodeId }): Promise<string> => {
+		const metadata = sessionMetadata(requireSessionId());
+		const tree = await callGrpc(() =>
+			orchestrationClient().getCanvasTree({ canvasId }, { metadata })
+		);
+		const ids = new Set<string>();
+		treeCanvasIds(tree.root, ids);
+		ids.delete(canvasId); // already on screen: the caller looked there first
+		const found = await Promise.all(
+			[...ids].map(async id => {
+				const detail = await orchestrationClient().getCanvas({ canvasId: id }, { metadata });
+				return detail.nodes.some(node => node.id === nodeId) ? id : '';
+			})
+		);
+		return found.find(id => id !== '') ?? '';
+	}
+);
+
+/**
+ * Attaching or detaching a subcanvas moves a canvas between the root listing
+ * and its parent's tree, so the shell's listings go stale with the graph — for
+ * the canvas that was edited and for the canvas that changed hands.
+ */
+const refreshSubcanvasViews = (canvasId: string, targetCanvasId: string) =>
+	Promise.all([
+		getCanvasGraph({ canvasId }).refresh(),
+		getCanvasTrail({ canvasId }).refresh(),
+		getCanvasTrail({ canvasId: targetCanvasId }).refresh(),
+		listImportableCanvases({ canvasId }).refresh(),
+		listImportableCanvases({ canvasId: targetCanvasId }).refresh(),
+		listCanvases({ includeSubcanvases: false }).refresh(),
+		listCanvases({ includeSubcanvases: true }).refresh(),
+		listCanvasOptions().refresh()
+	]);
+
+/**
+ * An export edit reshapes — or relabels — the mirrored port on the importing
+ * node, so the parent's graph is as stale as this one. A root canvas has no
+ * parent and refreshes only itself.
+ */
+async function refreshAcrossBoundary(
+	canvasId: string,
+	metadata: ReturnType<typeof sessionMetadata>
+) {
+	const detail = await callGrpc(() => orchestrationClient().getCanvas({ canvasId }, { metadata }));
+	const parent = detail.ancestors.at(-1);
+	await Promise.all([
+		getCanvasGraph({ canvasId }).refresh(),
+		...(parent ? [getCanvasGraph({ canvasId: parent.id }).refresh()] : [])
+	]);
+}
+
+/**
+ * A brand-new canvas plus the import node that embeds it. The two steps are not
+ * atomic in the control plane, so a failed import takes the canvas it just
+ * created back out rather than leaving a stray root behind.
+ */
+export const createSubcanvas = command(
+	v.object({ canvasId: idSchema, name: nameSchema, x: coordSchema, y: coordSchema }),
+	async ({ canvasId, name, x, y }) => {
+		const metadata = sessionMetadata(requireSessionId());
+		const created = await callGrpc(() =>
+			orchestrationClient().createCanvas({ name, description: '' }, { metadata })
+		);
+		const targetCanvasId = created.canvas?.id ?? '';
+		try {
+			await callGrpc(() =>
+				orchestrationClient().createNode(
+					{
+						canvasId,
+						name,
+						comment: '',
+						spec: { canvasImport: { canvasId: targetCanvasId } },
+						position: { x, y },
+						itemCount: 0
+					},
+					{ metadata }
+				)
+			);
+		} catch (err) {
+			await orchestrationClient()
+				.deleteCanvas({ canvasId: targetCanvasId }, { metadata })
+				.catch(() => undefined);
+			throw err;
+		}
+		await refreshSubcanvasViews(canvasId, targetCanvasId);
+		return { ok: true as const, subcanvasId: targetCanvasId };
+	}
+);
+
+/** Embeds an existing canvas. Its target is immutable once the node exists. */
+export const importCanvas = command(
+	v.object({
+		canvasId: idSchema,
+		targetCanvasId: idSchema,
+		name: nameSchema,
+		x: coordSchema,
+		y: coordSchema
+	}),
+	async ({ canvasId, targetCanvasId, name, x, y }) => {
+		const metadata = sessionMetadata(requireSessionId());
+		await callGrpc(() =>
+			orchestrationClient().createNode(
+				{
+					canvasId,
+					name,
+					comment: '',
+					spec: { canvasImport: { canvasId: targetCanvasId } },
+					position: { x, y },
+					itemCount: 0
+				},
+				{ metadata }
+			)
+		);
+		await refreshSubcanvasViews(canvasId, targetCanvasId);
+		return { ok: true as const };
+	}
+);
+
+/**
+ * One boundary port of this canvas. Creating it reshapes the importer's ports
+ * in the same transaction, so the parent gains a matching port at once.
+ */
+export const createExportNode = command(
+	v.object({
+		canvasId: idSchema,
+		name: nameSchema,
+		portKind: portKindSchema,
+		exportAs: exportAsSchema,
+		x: coordSchema,
+		y: coordSchema
+	}),
+	async ({ canvasId, name, portKind, exportAs, x, y }) => {
+		const metadata = sessionMetadata(requireSessionId());
+		await callGrpc(() =>
+			orchestrationClient().createNode(
+				{
+					canvasId,
+					name,
+					comment: '',
+					spec: {
+						canvasExport: { kind: fromPortKind(portKind), direction: fromExportAs(exportAs) }
+					},
+					position: { x, y },
+					itemCount: 0
+				},
+				{ metadata }
+			)
+		);
+		await refreshAcrossBoundary(canvasId, metadata);
+		return { ok: true as const };
+	}
+);
+
+/**
+ * Re-kinding an export reshapes the mirrored port on the importer, which drops
+ * whatever edge the parent had attached to it.
+ */
+export const replaceExportSpec = command(
+	v.object({
+		canvasId: idSchema,
+		nodeId: idSchema,
+		portKind: portKindSchema,
+		exportAs: exportAsSchema
+	}),
+	async ({ canvasId, nodeId, portKind, exportAs }) => {
+		const metadata = sessionMetadata(requireSessionId());
+		await callGrpc(() =>
+			orchestrationClient().replaceNodeSpec(
+				{
+					nodeId,
+					spec: {
+						canvasExport: { kind: fromPortKind(portKind), direction: fromExportAs(exportAs) }
+					},
+					itemCount: 0
+				},
+				{ metadata }
+			)
+		);
+		await refreshAcrossBoundary(canvasId, metadata);
+		return { ok: true as const };
+	}
+);
+
 export const createPodNode = command(
 	v.object({
 		canvasId: idSchema,
@@ -552,9 +864,14 @@ export const updateNodeText = command(
 		canvasId: idSchema,
 		nodeId: idSchema,
 		name: nameSchema,
-		comment: commentSchema
+		comment: commentSchema,
+		/**
+		 * Set for an export node: the parent labels its mirrored port with this
+		 * name, so a rename here changes what the parent draws.
+		 */
+		boundary: v.optional(v.boolean(), false)
 	}),
-	async ({ canvasId, nodeId, name, comment }) => {
+	async ({ canvasId, nodeId, name, comment, boundary }) => {
 		const metadata = sessionMetadata(requireSessionId());
 		// An unset `position` means "do not move".
 		await callGrpc(() =>
@@ -563,14 +880,17 @@ export const updateNodeText = command(
 				{ metadata }
 			)
 		);
-		await getCanvasGraph({ canvasId }).refresh();
+		if (boundary) await refreshAcrossBoundary(canvasId, metadata);
+		else await getCanvasGraph({ canvasId }).refresh();
 		return { ok: true as const };
 	}
 );
 
 /**
  * `UpdateNodeMeta` replaces name and comment wholesale, so a move has to resend
- * them. Deliberately does not refresh: the dragged position already matches.
+ * them. Deliberately does not refresh: the dragged position already matches —
+ * except for an export node, whose `position.y` orders the mirrored ports on
+ * the importing node, so the parent has to be re-read.
  */
 export const moveNode = command(
 	v.object({
@@ -579,9 +899,10 @@ export const moveNode = command(
 		name: nameSchema,
 		comment: commentSchema,
 		x: coordSchema,
-		y: coordSchema
+		y: coordSchema,
+		boundary: v.optional(v.boolean(), false)
 	}),
-	async ({ nodeId, name, comment, x, y }) => {
+	async ({ canvasId, nodeId, name, comment, x, y, boundary }) => {
 		const metadata = sessionMetadata(requireSessionId());
 		await callGrpc(() =>
 			orchestrationClient().updateNodeMeta(
@@ -589,6 +910,7 @@ export const moveNode = command(
 				{ metadata }
 			)
 		);
+		if (boundary) await refreshAcrossBoundary(canvasId, metadata);
 		return { ok: true as const };
 	}
 );
@@ -721,15 +1043,30 @@ export const replacePodSpec = command(
 );
 
 export const deleteNode = command(
-	v.object({ canvasId: idSchema, nodeId: idSchema, force: v.optional(v.boolean(), false) }),
-	async ({ canvasId, nodeId, force }) => {
+	v.object({
+		canvasId: idSchema,
+		nodeId: idSchema,
+		force: v.optional(v.boolean(), false),
+		/**
+		 * The canvas an import node embeds. Retiring it hands that canvas back to
+		 * the root listing, which every listing and both trails have to be told
+		 * about. The caller supplies it because the node is gone by the time the
+		 * graph is re-read.
+		 */
+		subcanvasTarget: v.optional(v.string(), ''),
+		/** Set for an export node: its mirrored port leaves the parent's graph. */
+		boundary: v.optional(v.boolean(), false)
+	}),
+	async ({ canvasId, nodeId, force, subcanvasTarget, boundary }) => {
 		const metadata = sessionMetadata(requireSessionId());
 		await callGrpc(() =>
 			force
 				? orchestrationClient().forceDeleteNode({ nodeId }, { metadata })
 				: orchestrationClient().retireNode({ nodeId }, { metadata })
 		);
-		await getCanvasGraph({ canvasId }).refresh();
+		if (subcanvasTarget) await refreshSubcanvasViews(canvasId, subcanvasTarget);
+		else if (boundary) await refreshAcrossBoundary(canvasId, metadata);
+		else await getCanvasGraph({ canvasId }).refresh();
 		return { ok: true as const };
 	}
 );
