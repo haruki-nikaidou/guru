@@ -41,7 +41,14 @@ fn exit_spec(dest: &str) -> NodeSpec {
 async fn canvas_crud_round_trip() -> TestResult {
     let sp = setup().await?;
     let c = canvas(&sp, "prod").await?;
-    assert_eq!(sp.process(ListCanvases {}).await?.len(), 1);
+    assert_eq!(
+        sp.process(ListCanvases {
+            include_subcanvases: false
+        })
+        .await?
+        .len(),
+        1
+    );
 
     let updated = sp
         .process(UpdateCanvasMeta {
@@ -717,6 +724,8 @@ async fn deleting_an_ip_a_pod_listens_on_is_refused() -> TestResult {
     sp.process(DeleteNodeRow {
         id: pod.node.id.clone(),
         canvas: c.id.clone(),
+        import_sync: None,
+        frees_canvas: None,
     })
     .await?;
     sp.process(DeleteServerRow {
@@ -825,6 +834,7 @@ async fn create_node_writes_node_and_ports_together() -> TestResult {
             name: "edge".to_string(),
             comment: "renamed".to_string(),
             position: Some(pos(3, 4)),
+            import_sync: None,
         })
         .await?;
     assert_eq!(meta.node.name, "edge");
@@ -851,6 +861,7 @@ async fn create_node_writes_node_and_ports_together() -> TestResult {
             name: "edge".to_string(),
             comment: "moved".to_string(),
             position: Some(pos(9, 9)),
+            import_sync: None,
         })
         .await?;
     assert!(!moved.renamed);
@@ -890,6 +901,8 @@ async fn deleting_a_node_removes_its_ports_and_edges() -> TestResult {
     sp.process(DeleteNodeRow {
         id: pod.node.id.clone(),
         canvas: c.id.clone(),
+        import_sync: None,
+        frees_canvas: None,
     })
     .await?;
     assert!(
@@ -964,6 +977,7 @@ async fn updating_a_spec_keeps_edges_on_surviving_ports() -> TestResult {
             canvas: c.id.clone(),
             spec: pod_spec(&ip, 8443),
             ports: pod_ports(),
+            import_sync: None,
         })
         .await?;
     assert_eq!(updated.node.id.0, pod.node.id.0);
@@ -996,6 +1010,7 @@ async fn updating_a_spec_keeps_edges_on_surviving_ports() -> TestResult {
             canvas: c.id.clone(),
             spec: pod_spec(&ip, 8443),
             ports: narrowed,
+            import_sync: None,
         })
         .await?;
     assert_eq!(updated.ports.len(), 1);
@@ -1070,7 +1085,13 @@ async fn canvas_contents_render_the_whole_canvas() -> TestResult {
     assert_eq!(contents.servers[0].ips.len(), 1);
     assert_eq!(contents.nodes.len(), 1);
 
-    let topology = sp.process(LoadCanvasTopology { canvas: c.id }).await?;
+    let topology = sp
+        .process(LoadCanvasTopology {
+            canvas: c.id.clone(),
+        })
+        .await?;
+    assert_eq!(topology.root.0, c.id.0);
+    assert_eq!(topology.canvases.len(), 1);
     assert_eq!(topology.nodes.len(), 1);
     assert_eq!(topology.ips.len(), 1);
     assert_eq!(topology.servers.len(), 1);

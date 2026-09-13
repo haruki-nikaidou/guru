@@ -29,8 +29,35 @@ A canvas is a bipartite dataflow over two independent port kinds:
 - **DeriveDestination** flows `Exit(out) → … → Pod(in)`: where a pod's traffic goes,
   possibly through load balancers and relays.
 
-Every port carries at most one edge. `CanvasImport`/`CanvasExport` are rejected
-until subcanvases land.
+Every port carries at most one edge.
+
+## Subcanvases
+
+A `CanvasImport` node embeds another canvas as one node; a `CanvasExport` node
+inside that canvas is one boundary port. Nesting is arbitrarily deep and stored
+only on the import node (`spec.config.canvas`); root, ancestors and tree are
+computed by `fn::orchestration_root` / `_ancestors` / `_tree` in the schema.
+
+- **Import ports are derived.** An import node has one port per export node of
+  its target: key = the export node's record id, kind copied, direction
+  mirrored (an `InputIntoCanvas` export emits inside, so the import port is an
+  input), ordered by the export's `position.y`. Creating, retiring, re-kinding or
+  moving an export reshapes the importer's ports in the same transaction
+  (`fn::orchestration_reshape_ports`); a port whose key survives keeps its edges,
+  a retired export silently drops the parent edge on its mirrored port.
+- **The tree is the unit of everything.** Topology checks, switch safety and
+  derivation load the whole tree and look *through* boundaries
+  (`topology::Index::peer`), so a nested graph derives byte-identical TOML to
+  its flattened equivalent. Only the root's `generation` counts: every mutating
+  transaction calls `fn::orchestration_touch`, and the derivation hook resolves
+  the root of whatever canvas it is told about.
+- **Rules.** A canvas cannot import itself or an ancestor, is imported at most
+  once (unique index on `spec.config.canvas`), and an import node's target is
+  immutable (retire and import again). An imported canvas cannot be deleted
+  until its import is retired; deleting a root deletes its whole tree.
+- **Servers stay put.** A parent sees a child canvas as a black box, but the
+  tree is one graph: a pod anywhere in a tree may listen on any server of that
+  tree (`spec.config.ip` is asserted against the tree, not the canvas).
 
 ## The config view
 

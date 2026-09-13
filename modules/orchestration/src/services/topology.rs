@@ -5,6 +5,12 @@
 //! same checker answers `ValidateCanvas`, where warnings are reported alongside
 //! errors.
 //!
+//! The unit of checking is a whole canvas tree. Import and export nodes are not
+//! vertices of the traffic graph: [`Index::peer`] resolves *through* them, so a
+//! path that crosses a canvas boundary is checked exactly like the flat graph it
+//! stands for. What the boundary nodes contribute are the nesting rules
+//! (`check_imports`) and the derived port shape of an import node.
+//!
 //! What passes here is storable, not necessarily derivable: a half-drawn chain
 //! (a relay whose `listen` side is not fed yet, a load balancer with no connected
 //! members) is deliberately allowed so an operator can save mid-edit. Derivation
@@ -18,8 +24,11 @@
 use crate::entities::surreal::connection::{EdgeConnectionEntity, EdgeConnectionId};
 use crate::entities::surreal::node::{NodeEntity, NodeId, NodeSpec, NodeWithPorts, RelayProtocol};
 use crate::entities::surreal::port::{PortDirection, PortEntity, PortId, PortKind};
-use crate::entities::surreal::server::{ServerId, ServerIpRecordEntity, ServerIpv6Resolve};
+use crate::entities::surreal::server::{
+    ServerEntity, ServerId, ServerIpRecordEntity, ServerIpv6Resolve,
+};
 use crate::entities::surreal::topology::CanvasTopology;
+use crate::services::node::{export_port_direction, import_port_layout};
 use crate::utils::ids::record_key;
 use std::collections::{HashMap, HashSet};
 
@@ -42,10 +51,13 @@ pub enum ProblemKind {
     PodIpForeign,
     ExitDestinationInvalid,
     IpHashWithoutClientIp,
-    UnsupportedSpec,
     PodPortUnconnected,
     RelaySameServer,
     DistributeSingleMember,
+    CanvasImportSelf,
+    CanvasImportAncestor,
+    CanvasImportDuplicate,
+    CanvasImportUnresolved,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +125,13 @@ pub enum TopologyEdit {
     RetireNode {
         node: NodeId,
     },
+    /// Replaces a node's port list. Edges on a port whose key disappears are
+    /// dropped; a port whose key survives is expected to carry its old id, so
+    /// the edges on it stay attached (the write does the same).
+    ReshapePorts {
+        node: NodeId,
+        ports: Vec<PortEntity>,
+    },
     AddEdge {
         edge: EdgeConnectionEntity,
     },
@@ -153,6 +172,28 @@ impl CanvasTopology {
                             && !ports.contains(&record_key(&e.target.0))
                     });
                 }
+                TopologyEdit::ReshapePorts { node, ports } => {
+                    let key = record_key(&node.0);
+                    let Some(target) = out
+                        .nodes
+                        .iter_mut()
+                        .find(|n| record_key(&n.node.id.0) == key)
+                    else {
+                        continue;
+                    };
+                    let kept: HashSet<&str> = ports.iter().map(|p| p.key.as_str()).collect();
+                    let gone: HashSet<String> = target
+                        .ports
+                        .iter()
+                        .filter(|p| !kept.contains(p.key.as_str()))
+                        .map(|p| record_key(&p.id.0))
+                        .collect();
+                    target.ports = ports.clone();
+                    out.edges.retain(|e| {
+                        !gone.contains(&record_key(&e.source.0))
+                            && !gone.contains(&record_key(&e.target.0))
+                    });
+                }
                 TopologyEdit::AddEdge { edge } => out.edges.push(edge.clone()),
                 TopologyEdit::RetireEdge { edge } => {
                     let key = record_key(&edge.0);
@@ -187,6 +228,7 @@ pub fn analyze(topology: &CanvasTopology) -> Vec<TopologyProblem> {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
+    check_imports(&index, &mut errors);
     check_edges(&index, topology, &mut errors);
     check_port_shapes(&index, &mut errors);
     check_specs(&index, &mut errors);
@@ -211,27 +253,53 @@ pub fn ensure_valid(topology: &CanvasTopology) -> Result<(), Box<TopologyError>>
     }
 }
 
+/// How many import/export hops a lookup follows before giving up. A cycle of
+/// imports is reported by `check_imports`; the guard only keeps lookups finite.
+const MAX_BOUNDARY_HOPS: usize = 64;
+
 /// Lookup tables over one topology snapshot, keyed by record key.
-struct Index<'a> {
-    canvas: String,
-    nodes: HashMap<String, &'a NodeWithPorts>,
+///
+/// Shared with the deriver: [`Index::peer`] is the single definition of "what is
+/// on the other side of this port", including across canvas boundaries.
+pub(crate) struct Index<'a> {
+    pub(crate) nodes: HashMap<String, &'a NodeWithPorts>,
     /// port key -> (port, owning node)
-    ports: HashMap<String, (&'a PortEntity, &'a NodeWithPorts)>,
-    ips: HashMap<String, &'a ServerIpRecordEntity>,
-    servers: HashSet<String>,
+    pub(crate) ports: HashMap<String, (&'a PortEntity, &'a NodeWithPorts)>,
+    pub(crate) ips: HashMap<String, &'a ServerIpRecordEntity>,
+    pub(crate) servers: HashMap<String, &'a ServerEntity>,
+    pub(crate) canvases: HashSet<String>,
     /// port key -> live edges touching it
     edges_by_port: HashMap<String, Vec<&'a EdgeConnectionEntity>>,
+    /// canvas key -> the node importing it
+    importer: HashMap<String, &'a NodeWithPorts>,
+    /// canvas key -> its export nodes, in `(position.y, key)` order
+    exports: HashMap<String, Vec<&'a NodeWithPorts>>,
 }
 
 impl<'a> Index<'a> {
-    fn build(topology: &'a CanvasTopology) -> Self {
+    pub(crate) fn build(topology: &'a CanvasTopology) -> Self {
         let mut nodes = HashMap::new();
         let mut ports = HashMap::new();
+        let mut importer = HashMap::new();
+        let mut exports: HashMap<String, Vec<&NodeWithPorts>> = HashMap::new();
         for node in &topology.nodes {
             nodes.insert(record_key(&node.node.id.0), node);
             for port in &node.ports {
                 ports.insert(record_key(&port.id.0), (port, node));
             }
+            match &node.node.spec {
+                NodeSpec::CanvasImport(cfg) => {
+                    importer.insert(record_key(&cfg.canvas.0), node);
+                }
+                NodeSpec::CanvasExport(_) => exports
+                    .entry(record_key(&node.node.canvas.0))
+                    .or_default()
+                    .push(node),
+                _ => {}
+            }
+        }
+        for list in exports.values_mut() {
+            list.sort_by_cached_key(|n| (n.node.position.y, record_key(&n.node.id.0)));
         }
         let mut edges_by_port: HashMap<String, Vec<&EdgeConnectionEntity>> = HashMap::new();
         for edge in &topology.edges {
@@ -245,7 +313,6 @@ impl<'a> Index<'a> {
                 .push(edge);
         }
         Self {
-            canvas: record_key(&topology.canvas.0),
             nodes,
             ports,
             ips: topology
@@ -256,9 +323,16 @@ impl<'a> Index<'a> {
             servers: topology
                 .servers
                 .iter()
-                .map(|s| record_key(&s.id.0))
+                .map(|s| (record_key(&s.id.0), s))
+                .collect(),
+            canvases: topology
+                .canvases
+                .iter()
+                .map(|c| record_key(&c.id.0))
                 .collect(),
             edges_by_port,
+            importer,
+            exports,
         }
     }
 
@@ -266,26 +340,138 @@ impl<'a> Index<'a> {
         self.ports.get(&record_key(&id.0)).copied()
     }
 
-    /// The single live edge on a port, if any.
-    fn edge_on(&self, port: &PortEntity) -> Option<&'a EdgeConnectionEntity> {
+    pub(crate) fn ip(&self, key: &str) -> Option<&'a ServerIpRecordEntity> {
+        self.ips.get(key).copied()
+    }
+
+    /// The single live edge on a port, if any. Raw: does not look through
+    /// boundaries.
+    pub(crate) fn edge_on(&self, port: &PortEntity) -> Option<&'a EdgeConnectionEntity> {
         self.edges_by_port
             .get(&record_key(&port.id.0))
             .and_then(|edges| edges.first().copied())
     }
 
-    /// The node on the other side of a port's edge.
-    fn peer(&self, port: &PortEntity) -> Option<&'a NodeWithPorts> {
-        let edge = self.edge_on(port)?;
-        let other = if record_key(&edge.source.0) == record_key(&port.id.0) {
-            &edge.target
-        } else {
-            &edge.source
-        };
-        self.port(other).map(|(_, node)| node)
+    /// The traffic node on the other side of a port's edge, looking through
+    /// import/export boundaries.
+    ///
+    /// An import node's port stands for the export node of the same key in the
+    /// imported canvas, whose single port continues the path; an export node
+    /// stands for the mirrored port on the node importing its canvas. `None` when
+    /// any hop is missing (no edge, unresolved import, export without importer).
+    pub(crate) fn peer(&self, port: &PortEntity) -> Option<&'a NodeWithPorts> {
+        let mut current: &PortEntity = port;
+        for _ in 0..MAX_BOUNDARY_HOPS {
+            let edge = self.edge_on(current)?;
+            let other = if record_key(&edge.source.0) == record_key(&current.id.0) {
+                &edge.target
+            } else {
+                &edge.source
+            };
+            let (far_port, far_node) = self.port(other)?;
+            match &far_node.node.spec {
+                NodeSpec::CanvasImport(cfg) => {
+                    let export = self.nodes.get(&far_port.key).copied()?;
+                    if !matches!(export.node.spec, NodeSpec::CanvasExport(_))
+                        || record_key(&export.node.canvas.0) != record_key(&cfg.canvas.0)
+                    {
+                        return None;
+                    }
+                    current = export.ports.first()?;
+                }
+                NodeSpec::CanvasExport(_) => {
+                    let importer = self.importer.get(&record_key(&far_node.node.canvas.0))?;
+                    let key = record_key(&far_node.node.id.0);
+                    current = importer.ports.iter().find(|p| p.key == key)?;
+                }
+                _ => return Some(far_node),
+            }
+        }
+        None
     }
 
-    fn port_by_key(&self, node: &'a NodeWithPorts, key: &str) -> Option<&'a PortEntity> {
+    pub(crate) fn port_by_key(&self, node: &'a NodeWithPorts, key: &str) -> Option<&'a PortEntity> {
         node.ports.iter().find(|p| p.key == key)
+    }
+
+    /// `[parent, grandparent, ...]` of a canvas, following import nodes upward.
+    fn ancestors(&self, canvas: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = canvas.to_string();
+        for _ in 0..MAX_BOUNDARY_HOPS {
+            let Some(importer) = self.importer.get(&current) else {
+                break;
+            };
+            current = record_key(&importer.node.canvas.0);
+            out.push(current.clone());
+        }
+        out
+    }
+
+    /// The root of the tree a canvas belongs to (the canvas itself on a cycle).
+    fn root_of(&self, canvas: &str) -> String {
+        let chain = self.ancestors(canvas);
+        if chain.len() >= MAX_BOUNDARY_HOPS {
+            return canvas.to_string();
+        }
+        chain.last().cloned().unwrap_or_else(|| canvas.to_string())
+    }
+}
+
+fn check_imports(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
+    let mut by_target: HashMap<String, Vec<&NodeWithPorts>> = HashMap::new();
+    for node in sorted_nodes(index) {
+        let NodeSpec::CanvasImport(cfg) = &node.node.spec else {
+            continue;
+        };
+        let target = record_key(&cfg.canvas.0);
+        let own = record_key(&node.node.canvas.0);
+        if target == own {
+            out.push(
+                TopologyProblem::error(
+                    ProblemKind::CanvasImportSelf,
+                    format!("node {} imports its own canvas", node.node.name),
+                )
+                .with_nodes(vec![node.node.id.clone()]),
+            );
+            continue;
+        }
+        if index.ancestors(&own).contains(&target) {
+            out.push(
+                TopologyProblem::error(
+                    ProblemKind::CanvasImportAncestor,
+                    format!("node {} imports an ancestor canvas", node.node.name),
+                )
+                .with_nodes(vec![node.node.id.clone()]),
+            );
+        }
+        if !index.canvases.contains(&target) {
+            out.push(
+                TopologyProblem::error(
+                    ProblemKind::CanvasImportUnresolved,
+                    format!(
+                        "node {} imports a canvas that does not exist",
+                        node.node.name
+                    ),
+                )
+                .with_nodes(vec![node.node.id.clone()]),
+            );
+        }
+        by_target.entry(target).or_default().push(node);
+    }
+    let mut duplicates: Vec<(String, Vec<&NodeWithPorts>)> = by_target
+        .into_iter()
+        .filter(|(_, nodes)| nodes.len() > 1)
+        .collect();
+    duplicates.sort_by(|a, b| a.0.cmp(&b.0));
+    for (target, nodes) in duplicates {
+        out.push(
+            TopologyProblem::error(
+                ProblemKind::CanvasImportDuplicate,
+                format!("canvas {target} is imported more than once"),
+            )
+            .with_nodes(nodes.iter().map(|n| n.node.id.clone()).collect()),
+        );
     }
 }
 
@@ -350,9 +536,7 @@ fn check_edges(index: &Index<'_>, topology: &CanvasTopology, out: &mut Vec<Topol
                 .with_nodes(vec![source_node.node.id.clone()]),
             );
         }
-        if record_key(&source_node.node.canvas.0) != index.canvas
-            || record_key(&target_node.node.canvas.0) != index.canvas
-        {
+        if record_key(&source_node.node.canvas.0) != record_key(&target_node.node.canvas.0) {
             out.push(
                 TopologyProblem::error(
                     ProblemKind::EdgeCrossCanvas,
@@ -385,6 +569,8 @@ fn check_edges(index: &Index<'_>, topology: &CanvasTopology, out: &mut Vec<Topol
 }
 
 /// `(kind, direction, exact count or "at least 2")` a spec's ports must match.
+/// `None` for an import node, whose ports are checked against its target's
+/// exports instead.
 fn expected_ports(spec: &NodeSpec) -> Option<Vec<(PortKind, PortDirection, Multiplicity)>> {
     use Multiplicity::{AtLeastTwo, One};
     use PortDirection::{Input, Output};
@@ -402,7 +588,10 @@ fn expected_ports(spec: &NodeSpec) -> Option<Vec<(PortKind, PortDirection, Multi
             (DeriveDestination, Input, One),
             (DeriveDestination, Output, AtLeastTwo),
         ],
-        NodeSpec::CanvasImport(_) | NodeSpec::CanvasExport(_) => return None,
+        NodeSpec::CanvasExport(cfg) => {
+            vec![(cfg.kind, export_port_direction(cfg.direction), One)]
+        }
+        NodeSpec::CanvasImport(_) => return None,
     })
 }
 
@@ -414,22 +603,49 @@ enum Multiplicity {
 
 fn check_port_shapes(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
     for node in sorted_nodes(index) {
-        let Some(expected) = expected_ports(&node.node.spec) else {
-            continue; // unsupported specs are reported separately
+        let ok = match &node.node.spec {
+            NodeSpec::CanvasImport(cfg) => {
+                let target = record_key(&cfg.canvas.0);
+                if !index.canvases.contains(&target) {
+                    continue; // reported by `check_imports`
+                }
+                let exports: Vec<&NodeEntity> = index
+                    .exports
+                    .get(&target)
+                    .map(|list| list.iter().map(|n| &n.node).collect())
+                    .unwrap_or_default();
+                let expected: HashSet<(String, PortKind, PortDirection)> =
+                    import_port_layout(&exports)
+                        .into_iter()
+                        .map(|p| (p.key, p.kind, p.direction))
+                        .collect();
+                let actual: HashSet<(String, PortKind, PortDirection)> = node
+                    .ports
+                    .iter()
+                    .map(|p| (p.key.clone(), p.kind, p.direction))
+                    .collect();
+                expected == actual && node.ports.len() == actual.len()
+            }
+            spec => {
+                let Some(expected) = expected_ports(spec) else {
+                    continue;
+                };
+                let mut counts: HashMap<(PortKind, PortDirection), usize> = HashMap::new();
+                for port in &node.ports {
+                    let slot = counts.entry((port.kind, port.direction)).or_insert(0);
+                    *slot = slot.saturating_add(1);
+                }
+                let mut ok = counts.len() == expected.len();
+                for (kind, direction, multiplicity) in expected {
+                    let count = counts.get(&(kind, direction)).copied().unwrap_or(0);
+                    ok &= match multiplicity {
+                        Multiplicity::One => count == 1,
+                        Multiplicity::AtLeastTwo => count >= 2,
+                    };
+                }
+                ok
+            }
         };
-        let mut counts: HashMap<(PortKind, PortDirection), usize> = HashMap::new();
-        for port in &node.ports {
-            let slot = counts.entry((port.kind, port.direction)).or_insert(0);
-            *slot = slot.saturating_add(1);
-        }
-        let mut ok = counts.len() == expected.len();
-        for (kind, direction, multiplicity) in expected {
-            let count = counts.get(&(kind, direction)).copied().unwrap_or(0);
-            ok &= match multiplicity {
-                Multiplicity::One => count == 1,
-                Multiplicity::AtLeastTwo => count >= 2,
-            };
-        }
         if !ok {
             out.push(
                 TopologyProblem::error(
@@ -445,27 +661,26 @@ fn check_port_shapes(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
 fn check_specs(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
     for node in sorted_nodes(index) {
         match &node.node.spec {
-            NodeSpec::CanvasImport(_) | NodeSpec::CanvasExport(_) => out.push(
-                TopologyProblem::error(
-                    ProblemKind::UnsupportedSpec,
-                    format!(
-                        "node {}: canvas import/export is not supported until subcanvases land",
-                        node.node.name
-                    ),
-                )
-                .with_nodes(vec![node.node.id.clone()]),
-            ),
+            // A pod may listen on any server of its tree: the parent sees the
+            // child as a black box, but the tree is derived as one graph.
             NodeSpec::Pod(cfg) => {
-                let foreign = match index.ips.get(&record_key(&cfg.ip.0)) {
+                let server_canvas = index
+                    .ips
+                    .get(&record_key(&cfg.ip.0))
+                    .and_then(|ip| index.servers.get(&record_key(&ip.server.0)))
+                    .map(|server| record_key(&server.canvas.0));
+                let foreign = match server_canvas {
                     None => true,
-                    Some(ip) => !index.servers.contains(&record_key(&ip.server.0)),
+                    Some(canvas) => {
+                        index.root_of(&canvas) != index.root_of(&record_key(&node.node.canvas.0))
+                    }
                 };
                 if foreign {
                     out.push(
                         TopologyProblem::error(
                             ProblemKind::PodIpForeign,
                             format!(
-                                "pod {} references an ip record outside this canvas",
+                                "pod {} references an ip record outside this canvas tree",
                                 node.node.name
                             ),
                         )
@@ -549,11 +764,19 @@ fn check_duplicate_listen(index: &Index<'_>, out: &mut Vec<TopologyProblem>) {
     }
 }
 
+/// Whether a node is a vertex of the traffic graph (boundary nodes are not).
+fn is_traffic_node(node: &NodeWithPorts) -> bool {
+    !matches!(
+        node.node.spec,
+        NodeSpec::CanvasImport(_) | NodeSpec::CanvasExport(_)
+    )
+}
+
 /// `consumer -> producers`: a node depends on whatever feeds its inputs, and a relay
-/// additionally depends on the pod it dials into.
+/// additionally depends on the pod it dials into. Boundaries are looked through.
 fn dependency_graph(index: &Index<'_>) -> HashMap<String, Vec<String>> {
     let mut graph: HashMap<String, Vec<String>> = HashMap::new();
-    for node in index.nodes.values() {
+    for node in index.nodes.values().filter(|n| is_traffic_node(n)) {
         let key = record_key(&node.node.id.0);
         let deps = graph.entry(key).or_default();
         for port in node

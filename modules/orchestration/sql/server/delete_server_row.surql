@@ -12,5 +12,5 @@ IF array::len($used) > 0 {
 DELETE orchestration_server_config_view WHERE server = $id;
 DELETE server_ip_record WHERE server = $id;
 DELETE $id;
-UPDATE $canvas SET generation += 1;
+fn::orchestration_touch($canvas);
 COMMIT TRANSACTION;

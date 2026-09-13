@@ -8,7 +8,7 @@ use crate::entities::surreal::server::{
     ServerIpRecordEntity, ServerIpRecordId, ServerIpv6Resolve, ServerWithIp, UpdateServerSettings,
 };
 use crate::entities::surreal::topology::LoadCanvasTopology;
-use crate::entities::surreal::view::ListServerConfigViewsByCanvas;
+use crate::entities::surreal::view::ListServerConfigViewsByCanvases;
 use crate::services::converge::ensure_switch_safe;
 use crate::services::rollout::DirtyNotifier;
 use crate::services::topology::{TopologyEdit, ensure_valid};
@@ -110,8 +110,8 @@ impl Processor<UpdateServer> for ServerService {
         ensure_valid(&projected)?;
         let views = self
             .db
-            .process(ListServerConfigViewsByCanvas {
-                canvas: canvas.clone(),
+            .process(ListServerConfigViewsByCanvases {
+                canvases: projected.canvas_ids(),
             })
             .await?;
         ensure_switch_safe(&projected, &views)?;

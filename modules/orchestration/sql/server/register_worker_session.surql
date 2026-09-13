@@ -15,7 +15,7 @@ IF array::len($rotated) > 0 {
         };
     };
     UPDATE $v.id SET in_flight = NONE;
-    UPDATE $canvas SET generation += 1;
+    fn::orchestration_touch($canvas);
 };
 RETURN $rotated[0];
 COMMIT TRANSACTION;

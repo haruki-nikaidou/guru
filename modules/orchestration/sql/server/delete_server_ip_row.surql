@@ -11,5 +11,5 @@ IF array::len($used) > 0 {
     THROW "ip record is still used by " + <string> array::len($used) + " pod(s)";
 };
 DELETE $id;
-UPDATE $canvas SET generation += 1;
+fn::orchestration_touch($canvas);
 COMMIT TRANSACTION;

@@ -63,10 +63,14 @@ enum ProblemKind {
   POD_IP_FOREIGN = 9;
   EXIT_DESTINATION_INVALID = 10;
   IP_HASH_WITHOUT_CLIENT_IP = 11;
-  UNSUPPORTED_SPEC = 12;
+  reserved 12; // UNSUPPORTED_SPEC: import/export nodes are supported since stage 2
   POD_PORT_UNCONNECTED = 13;
   RELAY_SAME_SERVER = 14;
   DISTRIBUTE_SINGLE_MEMBER = 15;
+  CANVAS_IMPORT_SELF = 16;
+  CANVAS_IMPORT_ANCESTOR = 17;
+  CANVAS_IMPORT_DUPLICATE = 18;
+  CANVAS_IMPORT_UNRESOLVED = 19;
 }
 
 message CanvasUiPosition {
@@ -136,6 +140,9 @@ message Node {
   NodeSpec spec = 5;
   CanvasUiPosition position = 6;
   repeated Port ports = 7;
+  // Set only for a canvas_import node: the canvas it embeds. An import node's
+  // ports mirror that canvas's export nodes (port key = export node id).
+  Canvas import_target = 8;
 }
 message Edge {
   string id = 1;
@@ -197,7 +204,10 @@ message CreateCanvasRequest {
 message CreateCanvasReply {
   Canvas canvas = 1;
 }
-message ListCanvasesRequest {}
+message ListCanvasesRequest {
+  // Subcanvases (canvases imported by another canvas) are omitted unless set.
+  bool include_subcanvases = 1;
+}
 message ListCanvasesReply {
   repeated Canvas canvases = 1;
 }
@@ -209,6 +219,19 @@ message GetCanvasReply {
   repeated Server servers = 2;
   repeated Node nodes = 3;
   repeated Edge edges = 4;
+  // Root first, parent last; empty for a root canvas.
+  repeated Canvas ancestors = 5;
+}
+// Any canvas of the tree may be given; the reply is always the whole tree.
+message GetCanvasTreeRequest {
+  string canvas_id = 1;
+}
+message CanvasTreeNode {
+  Canvas canvas = 1;
+  repeated CanvasTreeNode children = 2;
+}
+message GetCanvasTreeReply {
+  CanvasTreeNode root = 1;
 }
 message UpdateCanvasRequest {
   string canvas_id = 1;
@@ -378,6 +401,7 @@ service Orchestration {
   rpc UpdateCanvas(UpdateCanvasRequest) returns (UpdateCanvasReply);
   rpc DeleteCanvas(DeleteCanvasRequest) returns (DeleteCanvasReply);
   rpc ValidateCanvas(ValidateCanvasRequest) returns (ValidateCanvasReply);
+  rpc GetCanvasTree(GetCanvasTreeRequest) returns (GetCanvasTreeReply);
   rpc CreateServer(CreateServerRequest) returns (CreateServerReply);
   rpc UpdateServer(UpdateServerRequest) returns (UpdateServerReply);
   rpc DeleteServer(DeleteServerRequest) returns (DeleteServerReply);

@@ -3,7 +3,7 @@
 //! Handlers are thin: decode ids and specs, call a service, encode the reply. All
 //! rules live in `services`.
 
-use crate::entities::surreal::canvas::{CanvasEntity, CanvasUiPosition};
+use crate::entities::surreal::canvas::{CanvasEntity, CanvasTree, CanvasUiPosition};
 use crate::entities::surreal::connection::EdgeConnectionEntity;
 use crate::entities::surreal::node::{
     CanvasExportAs, CanvasExportConfig, CanvasImportConfig, EntryConfig, ExitConfig,
@@ -31,6 +31,29 @@ pub struct OrchestrationGrpc {
     pub nodes: NodeService,
     pub edges: EdgeService,
     pub rollout: RolloutService,
+}
+
+impl OrchestrationGrpc {
+    /// The canvas an import node embeds, as the lookup `node_to_proto` takes;
+    /// empty for every other node kind.
+    async fn import_target_of(
+        &self,
+        actor: &auth::services::identity::Identity,
+        node: &NodeEntity,
+    ) -> Result<Vec<CanvasEntity>, Status> {
+        let NodeSpec::CanvasImport(cfg) = &node.spec else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .canvases
+            .process(canvas::FindCanvas {
+                actor: actor.clone(),
+                canvas: cfg.canvas.clone(),
+            })
+            .await?
+            .into_iter()
+            .collect())
+    }
 }
 
 // --- encoding ---------------------------------------------------------------
@@ -201,8 +224,8 @@ fn spec_to_proto(spec: &NodeSpec) -> pb::NodeSpec {
         NodeSpec::LoadBalanceAggregate(_) => {
             Spec::LoadBalanceAggregate(pb::LoadBalanceAggregateConfig {})
         }
-        NodeSpec::CanvasImport(_) => Spec::CanvasImport(pb::CanvasImportConfig {
-            canvas_id: String::new(),
+        NodeSpec::CanvasImport(cfg) => Spec::CanvasImport(pb::CanvasImportConfig {
+            canvas_id: ids::record_key(&cfg.canvas.0),
         }),
         NodeSpec::CanvasExport(cfg) => Spec::CanvasExport(pb::CanvasExportConfig {
             kind: match cfg.kind {
@@ -295,7 +318,14 @@ fn spec_from_proto(spec: Option<pb::NodeSpec>) -> Result<NodeSpec, Status> {
         Spec::LoadBalanceAggregate(_) => {
             NodeSpec::LoadBalanceAggregate(LoadBalanceAggregateConfig {})
         }
-        Spec::CanvasImport(_) => NodeSpec::CanvasImport(CanvasImportConfig {}),
+        Spec::CanvasImport(cfg) => {
+            if cfg.canvas_id.is_empty() {
+                return Err(Status::invalid_argument("canvas_id is required"));
+            }
+            NodeSpec::CanvasImport(CanvasImportConfig {
+                canvas: ids::canvas_id(&cfg.canvas_id),
+            })
+        }
         Spec::CanvasExport(cfg) => NodeSpec::CanvasExport(CanvasExportConfig {
             kind: match pb::PortKind::try_from(cfg.kind) {
                 Ok(pb::PortKind::DeriveListen) => PortKind::DeriveListen,
@@ -321,7 +351,23 @@ fn spec_from_proto(spec: Option<pb::NodeSpec>) -> Result<NodeSpec, Status> {
     })
 }
 
-fn node_row_to_proto(node: &NodeEntity, ports: &[PortEntity]) -> pb::Node {
+/// `import_targets` resolves an import node's `import_target`; a node that is
+/// not an import, or whose target is not in the list, leaves it unset.
+fn node_row_to_proto(
+    node: &NodeEntity,
+    ports: &[PortEntity],
+    import_targets: &[CanvasEntity],
+) -> pb::Node {
+    let import_target = match &node.spec {
+        NodeSpec::CanvasImport(cfg) => {
+            let key = ids::record_key(&cfg.canvas.0);
+            import_targets
+                .iter()
+                .find(|c| ids::record_key(&c.id.0) == key)
+                .map(canvas_to_proto)
+        }
+        _ => None,
+    };
     pb::Node {
         id: ids::record_key(&node.id.0),
         canvas_id: ids::record_key(&node.canvas.0),
@@ -330,11 +376,19 @@ fn node_row_to_proto(node: &NodeEntity, ports: &[PortEntity]) -> pb::Node {
         spec: Some(spec_to_proto(&node.spec)),
         position: Some(position_to_proto(node.position)),
         ports: ports.iter().map(port_to_proto).collect(),
+        import_target,
     }
 }
 
-fn node_to_proto(node: &NodeWithPorts) -> pb::Node {
-    node_row_to_proto(&node.node, &node.ports)
+fn node_to_proto(node: &NodeWithPorts, import_targets: &[CanvasEntity]) -> pb::Node {
+    node_row_to_proto(&node.node, &node.ports, import_targets)
+}
+
+fn tree_to_proto(tree: &CanvasTree) -> pb::CanvasTreeNode {
+    pb::CanvasTreeNode {
+        canvas: Some(canvas_to_proto(&tree.canvas)),
+        children: tree.children.iter().map(tree_to_proto).collect(),
+    }
 }
 
 fn edge_to_proto(edge: &EdgeConnectionEntity) -> pb::Edge {
@@ -393,7 +447,10 @@ fn problem_to_proto(problem: &TopologyProblem) -> pb::Problem {
             ProblemKind::PodIpForeign => pb::ProblemKind::PodIpForeign,
             ProblemKind::ExitDestinationInvalid => pb::ProblemKind::ExitDestinationInvalid,
             ProblemKind::IpHashWithoutClientIp => pb::ProblemKind::IpHashWithoutClientIp,
-            ProblemKind::UnsupportedSpec => pb::ProblemKind::UnsupportedSpec,
+            ProblemKind::CanvasImportSelf => pb::ProblemKind::CanvasImportSelf,
+            ProblemKind::CanvasImportAncestor => pb::ProblemKind::CanvasImportAncestor,
+            ProblemKind::CanvasImportDuplicate => pb::ProblemKind::CanvasImportDuplicate,
+            ProblemKind::CanvasImportUnresolved => pb::ProblemKind::CanvasImportUnresolved,
             ProblemKind::PodPortUnconnected => pb::ProblemKind::PodPortUnconnected,
             ProblemKind::RelaySameServer => pb::ProblemKind::RelaySameServer,
             ProblemKind::DistributeSingleMember => pb::ProblemKind::DistributeSingleMember,
@@ -446,9 +503,13 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
         request: Request<pb::ListCanvasesRequest>,
     ) -> Result<Response<pb::ListCanvasesReply>, Status> {
         let actor = auth::rpc::middleware::from_request(&request)?;
+        let input = request.into_inner();
         let canvases = self
             .canvases
-            .process(canvas::ListCanvases { actor })
+            .process(canvas::ListCanvases {
+                actor,
+                include_subcanvases: input.include_subcanvases,
+            })
             .await?;
         Ok(Response::new(pb::ListCanvasesReply {
             canvases: canvases.iter().map(canvas_to_proto).collect(),
@@ -471,8 +532,31 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
         Ok(Response::new(pb::GetCanvasReply {
             canvas: Some(canvas_to_proto(&contents.canvas)),
             servers: contents.servers.iter().map(server_to_proto).collect(),
-            nodes: contents.nodes.iter().map(node_to_proto).collect(),
+            nodes: contents
+                .nodes
+                .iter()
+                .map(|n| node_to_proto(n, &contents.import_targets))
+                .collect(),
             edges: contents.edges.iter().map(edge_to_proto).collect(),
+            ancestors: contents.ancestors.iter().map(canvas_to_proto).collect(),
+        }))
+    }
+
+    async fn get_canvas_tree(
+        &self,
+        request: Request<pb::GetCanvasTreeRequest>,
+    ) -> Result<Response<pb::GetCanvasTreeReply>, Status> {
+        let actor = auth::rpc::middleware::from_request(&request)?;
+        let input = request.into_inner();
+        let tree = self
+            .canvases
+            .process(canvas::GetCanvasTree {
+                actor,
+                canvas: ids::canvas_id(&input.canvas_id),
+            })
+            .await?;
+        Ok(Response::new(pb::GetCanvasTreeReply {
+            root: Some(tree_to_proto(&tree)),
         }))
     }
 
@@ -654,7 +738,7 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
         let node = self
             .nodes
             .process(node::CreateNode {
-                actor,
+                actor: actor.clone(),
                 canvas: ids::canvas_id(&input.canvas_id),
                 name: input.name,
                 comment: input.comment,
@@ -663,8 +747,9 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
                 item_count: input.item_count,
             })
             .await?;
+        let targets = self.import_target_of(&actor, &node.node).await?;
         Ok(Response::new(pb::CreateNodeReply {
-            node: Some(node_to_proto(&node)),
+            node: Some(node_to_proto(&node, &targets)),
         }))
     }
 
@@ -683,8 +768,10 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
                 item_count: input.item_count,
             })
             .await?;
+        // An import node is never replaced (the service rejects it), so the
+        // reply can only be a non-import node.
         Ok(Response::new(pb::ReplaceNodeSpecReply {
-            node: Some(node_to_proto(&node)),
+            node: Some(node_to_proto(&node, &[])),
         }))
     }
 
@@ -697,15 +784,16 @@ impl pb::orchestration_server::Orchestration for OrchestrationGrpc {
         let node = self
             .nodes
             .process(node::UpdateNodeMeta {
-                actor,
+                actor: actor.clone(),
                 node: ids::node_id(&input.node_id),
                 name: input.name,
                 comment: input.comment,
                 position: position_from_proto(input.position),
             })
             .await?;
+        let targets = self.import_target_of(&actor, &node.node).await?;
         Ok(Response::new(pb::UpdateNodeMetaReply {
-            node: Some(node_to_proto(&node)),
+            node: Some(node_to_proto(&node, &targets)),
         }))
     }
 

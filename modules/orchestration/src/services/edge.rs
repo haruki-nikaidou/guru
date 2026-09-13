@@ -6,7 +6,7 @@ use crate::entities::surreal::connection::{
 use crate::entities::surreal::node::FindNodeById;
 use crate::entities::surreal::port::{FindPortById, PortId};
 use crate::entities::surreal::topology::LoadCanvasTopology;
-use crate::entities::surreal::view::ListServerConfigViewsByCanvas;
+use crate::entities::surreal::view::ListServerConfigViewsByCanvases;
 use crate::services::OrchestrationError;
 use crate::services::converge::ensure_switch_safe;
 use crate::services::rollout::DirtyNotifier;
@@ -70,8 +70,8 @@ impl Processor<Connect> for EdgeService {
         ensure_valid(&projected)?;
         let views = self
             .db
-            .process(ListServerConfigViewsByCanvas {
-                canvas: canvas.clone(),
+            .process(ListServerConfigViewsByCanvases {
+                canvases: projected.canvas_ids(),
             })
             .await?;
         ensure_switch_safe(&projected, &views)?;
@@ -84,7 +84,7 @@ impl Processor<Connect> for EdgeService {
                 canvas: canvas.clone(),
             })
             .await?;
-        self.notifier.notify(&canvas).await;
+        self.notifier.notify(&topology.root).await;
         Ok(edge)
     }
 }
@@ -120,8 +120,8 @@ impl Processor<Disconnect> for EdgeService {
         ensure_valid(&projected)?;
         let views = self
             .db
-            .process(ListServerConfigViewsByCanvas {
-                canvas: canvas.clone(),
+            .process(ListServerConfigViewsByCanvases {
+                canvases: projected.canvas_ids(),
             })
             .await?;
         ensure_switch_safe(&projected, &views)?;
@@ -132,7 +132,7 @@ impl Processor<Disconnect> for EdgeService {
                 canvas: canvas.clone(),
             })
             .await?;
-        self.notifier.notify(&canvas).await;
+        self.notifier.notify(&topology.root).await;
         Ok(())
     }
 }

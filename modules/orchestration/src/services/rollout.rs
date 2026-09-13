@@ -1,6 +1,6 @@
 //! Rollout status, config reads, and the dirty-canvas notifier.
 
-use crate::entities::surreal::canvas::{CanvasId, FindCanvasById};
+use crate::entities::surreal::canvas::{CanvasId, FindRootCanvas};
 use crate::entities::surreal::server::{FindServerById, ServerId};
 use crate::entities::surreal::topology::FindCanvasOfServer;
 use crate::entities::surreal::view::{
@@ -116,10 +116,11 @@ impl Processor<GetServerRolloutStatus> for RolloutService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
+        // Only the root of the server's tree carries a meaningful generation.
         let canvas = self
             .db
-            .process(FindCanvasById {
-                id: server.canvas.clone(),
+            .process(FindRootCanvas {
+                canvas: server.canvas.clone(),
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;

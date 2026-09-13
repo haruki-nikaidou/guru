@@ -5,129 +5,22 @@
 
 mod common;
 
-use auth::entities::surreal::account::{AccountId, AccountRole};
-use auth::services::identity::{Identity, IdentityKind};
 use common::*;
 use kanau::processor::Processor;
-use orchestration::entities::surreal::canvas::{CanvasId, CanvasUiPosition, FindCanvasById};
+use orchestration::entities::surreal::canvas::{CanvasId, FindCanvasById};
 use orchestration::entities::surreal::node::{
     EntryConfig, ExitConfig, NodeSpec, NodeWithPorts, PodConfig, RelayConfig, RelayProtocol,
 };
 use orchestration::entities::surreal::server::{FindServerById, ServerId, ServerIpv6Resolve};
 use orchestration::entities::surreal::view::{
-    AckServerConfig, FindServerConfigView, ListenProtocol, ListenerCap, ServerConfigViewEntity,
-    TakeInFlight,
+    AckServerConfig, ListenProtocol, ListenerCap, ServerConfigViewEntity, TakeInFlight,
 };
-use orchestration::hooks::derive::{CanvasDeriver, DeriveCanvas};
-use orchestration::services::agent::{AgentService, RegisterWorker};
-use orchestration::services::canvas::CanvasService;
-use orchestration::services::edge::{Connect, Disconnect, EdgeService};
-use orchestration::services::node::{CreateNode, NodeService, ReplaceNodeSpec};
-use orchestration::services::rollout::{ForgetServerApplied, RolloutService};
-use orchestration::services::server::{AddServerIp, CreateServer, ServerService};
+use orchestration::services::agent::RegisterWorker;
+use orchestration::services::edge::{Connect, Disconnect};
+use orchestration::services::node::{CreateNode, ReplaceNodeSpec};
+use orchestration::services::rollout::ForgetServerApplied;
+use orchestration::services::server::{AddServerIp, CreateServer};
 use orchestration::services::{OrchestrationError, canvas as canvas_service};
-use surrealdb::types::RecordId;
-use wakuwaku::surreal::SurrealProcessor;
-
-fn operator() -> Identity {
-    Identity {
-        account_id: AccountId(RecordId::new("auth_account", "admin")),
-        role: AccountRole::Admin,
-        kind: IdentityKind::Session,
-    }
-}
-
-fn machine() -> Identity {
-    Identity {
-        account_id: AccountId(RecordId::new("auth_account", "admin")),
-        role: AccountRole::Maintainer,
-        kind: IdentityKind::ApiKey,
-    }
-}
-
-/// A Maintainer holding a human session: it passes the `EditWorkspace` gate, so a
-/// refusal can only come from the role check itself.
-fn maintainer() -> Identity {
-    Identity {
-        account_id: AccountId(RecordId::new("auth_account", "ops")),
-        role: AccountRole::Maintainer,
-        kind: IdentityKind::Session,
-    }
-}
-
-fn pos0() -> CanvasUiPosition {
-    CanvasUiPosition { x: 0, y: 0 }
-}
-
-struct World {
-    db: SurrealProcessor,
-    canvases: CanvasService,
-    servers: ServerService,
-    nodes: NodeService,
-    edges: EdgeService,
-    agents: AgentService,
-    rollout: RolloutService,
-    deriver: CanvasDeriver,
-}
-
-async fn world() -> Result<World, Box<dyn std::error::Error>> {
-    let db = setup().await?;
-    Ok(World {
-        canvases: CanvasService {
-            db: db.clone(),
-            notifier: Default::default(),
-        },
-        servers: ServerService {
-            db: db.clone(),
-            notifier: Default::default(),
-        },
-        nodes: NodeService {
-            db: db.clone(),
-            notifier: Default::default(),
-        },
-        edges: EdgeService {
-            db: db.clone(),
-            notifier: Default::default(),
-        },
-        agents: AgentService {
-            db: db.clone(),
-            hub: Default::default(),
-            lease: Default::default(),
-            notifier: Default::default(),
-        },
-        rollout: RolloutService {
-            db: db.clone(),
-            notifier: Default::default(),
-        },
-        deriver: CanvasDeriver { db: db.clone() },
-        db,
-    })
-}
-
-impl World {
-    /// Runs a derivation pass the way the consumer or the sweeper would.
-    async fn derive(&self, canvas: &CanvasId) -> Result<(), Box<dyn std::error::Error>> {
-        self.deriver
-            .process(DeriveCanvas {
-                canvas: canvas.clone(),
-            })
-            .await?;
-        Ok(())
-    }
-
-    async fn view(
-        &self,
-        server: &ServerId,
-    ) -> Result<ServerConfigViewEntity, Box<dyn std::error::Error>> {
-        Ok(self
-            .db
-            .process(FindServerConfigView {
-                server: server.clone(),
-            })
-            .await?
-            .expect("every server has a config view"))
-    }
-}
 
 /// Takes and acknowledges whatever the database offers this server, the way a
 /// worker would.

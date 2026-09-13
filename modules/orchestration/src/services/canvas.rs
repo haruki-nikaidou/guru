@@ -1,13 +1,16 @@
 //! Canvas CRUD and validation.
 
 use crate::entities::surreal::canvas::{
-    CanvasContents, CanvasEntity, CanvasId, CreateCanvas as CreateCanvasRow, DeleteCanvasRow,
-    FindCanvasById, ListCanvases as ListCanvasesRow, UpdateCanvasMeta,
+    CanvasContents, CanvasEntity, CanvasId, CanvasTree, CreateCanvas as CreateCanvasRow,
+    DeleteCanvasRow, FindCanvasById, ListCanvases as ListCanvasesRow, LoadCanvasTree,
+    UpdateCanvasMeta,
 };
+use crate::entities::surreal::node::FindImporterOf;
 use crate::entities::surreal::topology::{LoadCanvasContents, LoadCanvasTopology};
 use crate::services::OrchestrationError;
 use crate::services::rollout::DirtyNotifier;
 use crate::services::topology::{TopologyProblem, analyze};
+use crate::utils::ids::record_key;
 use auth::services::identity::Identity;
 use auth::utils::rbac::Permission;
 use kanau::processor::Processor;
@@ -46,6 +49,8 @@ impl Processor<CreateCanvas> for CanvasService {
 
 pub struct ListCanvases {
     pub actor: Identity,
+    /// `false` lists only root canvases.
+    pub include_subcanvases: bool,
 }
 
 impl Processor<ListCanvases> for CanvasService {
@@ -54,7 +59,49 @@ impl Processor<ListCanvases> for CanvasService {
     #[tracing::instrument(name = "Service:ListCanvases", skip_all, err)]
     async fn process(&self, input: ListCanvases) -> Result<Self::Output, Self::Error> {
         input.actor.ensure(Permission::ViewWorkspace)?;
-        Ok(self.db.process(ListCanvasesRow {}).await?)
+        Ok(self
+            .db
+            .process(ListCanvasesRow {
+                include_subcanvases: input.include_subcanvases,
+            })
+            .await?)
+    }
+}
+
+/// The whole tree containing a canvas, from its root.
+pub struct GetCanvasTree {
+    pub actor: Identity,
+    pub canvas: CanvasId,
+}
+
+impl Processor<GetCanvasTree> for CanvasService {
+    type Output = CanvasTree;
+    type Error = OrchestrationError;
+    #[tracing::instrument(name = "Service:GetCanvasTree", skip_all, err)]
+    async fn process(&self, input: GetCanvasTree) -> Result<Self::Output, Self::Error> {
+        input.actor.ensure(Permission::ViewWorkspace)?;
+        self.db
+            .process(LoadCanvasTree {
+                canvas: input.canvas,
+            })
+            .await?
+            .ok_or(OrchestrationError::NotFound)
+    }
+}
+
+/// One canvas row by id, without its contents.
+pub struct FindCanvas {
+    pub actor: Identity,
+    pub canvas: CanvasId,
+}
+
+impl Processor<FindCanvas> for CanvasService {
+    type Output = Option<CanvasEntity>;
+    type Error = OrchestrationError;
+    #[tracing::instrument(name = "Service:FindCanvas", skip_all, err)]
+    async fn process(&self, input: FindCanvas) -> Result<Self::Output, Self::Error> {
+        input.actor.ensure(Permission::ViewWorkspace)?;
+        Ok(self.db.process(FindCanvasById { id: input.canvas }).await?)
     }
 }
 
@@ -120,7 +167,8 @@ pub struct DeleteCanvas {
 impl Processor<DeleteCanvas> for CanvasService {
     type Output = ();
     type Error = OrchestrationError;
-    /// Deletes the canvas and everything under it in one transaction.
+    /// Deletes the canvas and its whole tree in one transaction. An imported
+    /// canvas cannot be deleted: retire the import node first.
     ///
     /// Workers of the deleted servers keep running their last config: there is no
     /// canvas left to derive an empty one from, and no view row to send it through.
@@ -134,6 +182,20 @@ impl Processor<DeleteCanvas> for CanvasService {
             })
             .await?
             .ok_or(OrchestrationError::NotFound)?;
+        if let Some(importer) = self
+            .db
+            .process(FindImporterOf {
+                canvas: input.canvas.clone(),
+            })
+            .await?
+        {
+            return Err(OrchestrationError::Conflict(format!(
+                "canvas is imported by node {} in canvas {}; retire that node first",
+                importer.name,
+                record_key(&importer.canvas.0)
+            )));
+        }
+        // The transaction re-checks the import and throws on a race.
         self.db
             .process(DeleteCanvasRow { id: input.canvas })
             .await?;

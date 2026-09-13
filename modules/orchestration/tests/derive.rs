@@ -9,10 +9,11 @@ mod mem;
 
 use mem::*;
 use orchestration::entities::surreal::node::{
-    EntryConfig, ExitConfig, LoadBalanceAggregateConfig, LoadBalanceDistributeConfig,
-    LoadBalanceMode, NodeSpec, PodConfig, ProxyProtocolVersion, RelayConfig, RelayProtocol,
-    TlsConfig,
+    CanvasExportAs, EntryConfig, ExitConfig, LoadBalanceAggregateConfig,
+    LoadBalanceDistributeConfig, LoadBalanceMode, NodeSpec, PodConfig, ProxyProtocolVersion,
+    RelayConfig, RelayProtocol, TlsConfig,
 };
+use orchestration::entities::surreal::port::PortKind;
 use orchestration::entities::surreal::server::{ServerId, ServerIpRecordId};
 use orchestration::services::derive::derive_server_config;
 use orchestration::utils::ids;
@@ -391,4 +392,161 @@ fn an_empty_load_balance_group_invalidates_only_its_pod() {
         panic!("expected exactly one invalid pod, got {:?}", result.invalid);
     };
     assert_eq!(invalid.pod, "lb-pod");
+}
+
+/// An `OutputOutOfCanvas` export of kind `DeriveDestination`: its port inside the
+/// subcanvas is an input, the mirrored import port an output.
+fn dest_out() -> (NodeSpec, Vec<PortSpec>) {
+    (
+        export_spec(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+        export_ports(
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        ),
+    )
+}
+
+/// The exact topology of `load_balance_members_follow_port_position`, with the
+/// load balancer and its exits moved into a subcanvas: the pod's destination in
+/// the root is fed by the import node's mirrored port. Byte-identical TOML is the
+/// proof that the tree derives as its flattened graph.
+#[test]
+fn a_destination_through_an_import_node_derives_like_the_flat_graph() {
+    let mut b = Builder::new("prod");
+    let s = b.server("tokyo");
+    let ip = b.ip("ip1", &s, "203.0.113.10");
+    b.named_node("pod", "edge", pod(&ip, 443), pod_ports());
+    b.node(
+        "entry",
+        entry(Some(ProxyProtocolVersion::V2)),
+        entry_ports(),
+    );
+    b.node(
+        "import",
+        import_spec("sub"),
+        import_ports(&[(
+            "out",
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        )]),
+    );
+    b.connect("pod-listen", "entry-listen");
+    b.connect("import-out", "pod-destination");
+
+    b.canvas("sub");
+    let (spec, ports) = dest_out();
+    b.node("out", spec, ports);
+    b.node(
+        "lb",
+        NodeSpec::LoadBalanceDistribute(LoadBalanceDistributeConfig {
+            mode: LoadBalanceMode::Fallback,
+        }),
+        distribute_ports(3),
+    );
+    b.node("exit_c", exit("10.0.0.7:8080"), exit_ports());
+    b.node("exit_a", exit("10.0.0.5:8080"), exit_ports());
+    b.node("exit_b", exit("backend.internal:9000"), exit_ports());
+    b.connect("lb-destination", "out-export");
+    b.connect("exit_c-destination", "lb-member_2");
+    b.connect("exit_a-destination", "lb-member_0");
+    b.connect("exit_b-destination", "lb-member_1");
+
+    let toml = derived(&b, &s);
+    let flat = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/load_balance_fallback.toml"
+    ))
+    .unwrap();
+    assert_eq!(
+        toml, flat,
+        "the nested graph must derive the flat graph's TOML"
+    );
+    let result = derive_server_config(&b.build(), &s).unwrap();
+    assert!(result.invalid.is_empty(), "{:?}", result.invalid);
+    assert!(result.forwardings[0].points_at.is_empty());
+}
+
+/// root -> sub -> subsub. Server `a` (root) runs a pod whose destination crosses
+/// both boundaries to an exit in `subsub`; server `b` (root) runs an unrelated
+/// pod with its own exit.
+fn three_levels() -> (Builder, ServerId, ServerId) {
+    let mut b = Builder::new("root");
+    let a = b.server("a");
+    let ip_a = b.ip("ip_a", &a, "203.0.113.10");
+    let bb = b.server("b");
+    let ip_b = b.ip("ip_b", &bb, "203.0.113.20");
+    b.named_node("pod_a", "deep", pod(&ip_a, 443), pod_ports());
+    b.node("entry_a", entry(None), entry_ports());
+    b.node(
+        "import_sub",
+        import_spec("sub"),
+        import_ports(&[(
+            "sub_out",
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        )]),
+    );
+    b.connect("pod_a-listen", "entry_a-listen");
+    b.connect("import_sub-sub_out", "pod_a-destination");
+    b.named_node("pod_b", "shallow", pod(&ip_b, 443), pod_ports());
+    b.node("entry_b", entry(None), entry_ports());
+    b.node("exit_b", exit("10.0.0.9:8080"), exit_ports());
+    b.connect("pod_b-listen", "entry_b-listen");
+    b.connect("exit_b-destination", "pod_b-destination");
+
+    b.canvas("sub");
+    let (spec, ports) = dest_out();
+    b.node("sub_out", spec, ports);
+    b.node(
+        "import_subsub",
+        import_spec("subsub"),
+        import_ports(&[(
+            "subsub_out",
+            PortKind::DeriveDestination,
+            CanvasExportAs::OutputOutOfCanvas,
+        )]),
+    );
+    b.connect("import_subsub-subsub_out", "sub_out-export");
+
+    b.canvas("subsub");
+    let (spec, ports) = dest_out();
+    b.node("subsub_out", spec, ports);
+    b.node("exit_deep", exit("10.0.0.5:8080"), exit_ports());
+    b.connect("exit_deep-destination", "subsub_out-export");
+    (b, a, bb)
+}
+
+#[test]
+fn three_level_nesting_derives_each_server() {
+    let (b, a, bb) = three_levels();
+    assert_golden("nested_three_levels_a", &derived(&b, &a));
+    assert_golden("nested_three_levels_b", &derived(&b, &bb));
+}
+
+#[test]
+fn a_boundary_that_is_not_wired_through_invalidates_only_its_pod() {
+    let (b, a, bb) = three_levels();
+    let mut topology = b.build();
+    // The innermost export is left unconnected: the chain from `deep` dead-ends
+    // inside `subsub`, while `shallow` on the other server is untouched.
+    topology
+        .edges
+        .retain(|e| ids::record_key(&e.id.0) != "exit_deep-destination->subsub_out-export");
+    let result = derive_server_config(&topology, &a).unwrap();
+    assert!(result.config.forwardings.is_empty());
+    let [invalid] = result.invalid.as_slice() else {
+        panic!("expected exactly one invalid pod, got {:?}", result.invalid);
+    };
+    assert_eq!(invalid.pod, "deep");
+    assert!(
+        invalid.error.contains("not connected through"),
+        "{}",
+        invalid.error
+    );
+    let other = derive_server_config(&topology, &bb).unwrap();
+    assert_eq!(other.config.forwardings.len(), 1);
+    assert!(other.invalid.is_empty());
 }

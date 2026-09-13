@@ -26,10 +26,14 @@
 //! snapshots: `desired` (latest derivation), `in_flight` (handed to the worker,
 //! not yet acked) and `applied` (what it runs).
 //!
-//! 1. A mutation bumps `orchestration_canvas.generation` in its own transaction
-//!    and publishes `CanvasDirty`.
-//! 2. [`hooks::derive`] re-derives the whole canvas and commits only while the
-//!    generation still matches; a cron sweep catches anything the message missed.
+//! 1. A mutation bumps the *root* canvas's `orchestration_canvas.generation` in
+//!    its own transaction (`fn::orchestration_touch`) and publishes `CanvasDirty`.
+//!    Canvases nest through `CanvasImport`/`CanvasExport` nodes; the tree is the
+//!    unit of validation and derivation, and an import node's ports mirror its
+//!    target's export nodes.
+//! 2. [`hooks::derive`] re-derives the whole tree and commits only while the
+//!    root's generation still matches; a cron sweep catches anything the message
+//!    missed.
 //! 3. Derivation is convergent, not sequenced: a server switches a destination
 //!    only once the target's `applied` snapshot serves it, and keeps serving a
 //!    listener for as long as any snapshot still points at it.

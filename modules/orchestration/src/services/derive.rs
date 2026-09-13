@@ -1,9 +1,13 @@
-//! Config derivation: one server's ideal `guru-worker` config from a canvas topology.
+//! Config derivation: one server's ideal `guru-worker` config from a canvas tree.
 //!
 //! Derivation is a pure function of a [`CanvasTopology`] snapshot, so the same input
 //! always produces byte-identical output — that is what lets a derivation pass skip
 //! servers whose config did not actually change. What a server may *safely* run
 //! right now is decided afterwards, in [`crate::services::converge`].
+//!
+//! The snapshot is a whole canvas tree and every walk goes through
+//! [`Index::peer`], which resolves import/export boundaries, so a nested graph
+//! derives exactly the TOML its flattened equivalent would.
 //!
 //! Failure is per pod, not per server: each pod's listen and destination walks are
 //! caught at the pod, so one malformed chain costs exactly its own forwarding and
@@ -17,12 +21,12 @@ use crate::entities::surreal::port::{PortDirection, PortEntity};
 use crate::entities::surreal::server::{ServerId, ServerIpRecordEntity};
 use crate::entities::surreal::topology::CanvasTopology;
 use crate::entities::surreal::view::{ForwardingDeps, InvalidPod, ListenProtocol, ListenerCap};
+use crate::services::topology::Index;
 use crate::utils::ids::record_key;
 use guru_worker_config::{
     Config, Forwarding, ForwardingTo, ListenAs, LoadBalanceGroup, LogConfig, RelayHost,
     RelayProtocol, Remote, TcpProxyProtocol,
 };
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 #[derive(Debug, thiserror::Error)]
@@ -36,8 +40,10 @@ pub enum DeriveError {
         node: String,
         protocol: &'static str,
     },
-    #[error("node {node}: canvas import/export is not supported yet")]
+    #[error("node {node} cannot terminate a destination path")]
     UnsupportedSpec { node: String },
+    #[error("pod {node}: the import/export chain on one of its ports is not connected through")]
+    DanglingBoundary { node: String },
     #[error("pod {node} references missing ip record {ip}")]
     MissingIpRecord { node: String, ip: String },
     #[error("ip record {ip} holds '{value}', which is not an IP address")]
@@ -78,7 +84,7 @@ pub fn derive_server_config(
             server: server_key.clone(),
         })?;
 
-    let index = DeriveIndex::build(topology);
+    let index = Index::build(topology);
     let mut forwardings = Vec::new();
     let mut deps = Vec::new();
     let mut invalid = Vec::new();
@@ -150,7 +156,7 @@ pub fn derive_server_config(
 
 /// One pod's `[[forwarding]]` entry, or why that pod alone cannot be derived.
 fn derive_pod(
-    index: &DeriveIndex<'_>,
+    index: &Index<'_>,
     pod: &NodeWithPorts,
     cfg: &PodConfig,
     ip: &ServerIpRecordEntity,
@@ -166,7 +172,7 @@ fn derive_pod(
 
     let producer = index
         .peer(destination_port)
-        .ok_or_else(|| DeriveError::UnsupportedSpec {
+        .ok_or_else(|| DeriveError::DanglingBoundary {
             node: pod.node.name.clone(),
         })?;
     let mut visited = Vec::new();
@@ -195,13 +201,13 @@ fn derive_pod(
 
 /// The listen side of one pod: what the node feeding its `listen` port makes it.
 fn derive_listen(
-    index: &DeriveIndex<'_>,
+    index: &Index<'_>,
     pod: &NodeWithPorts,
     listen_port: &PortEntity,
 ) -> Result<(ListenAs, ListenProtocol, Option<TcpProxyProtocol>), DeriveError> {
     let consumer = index
         .peer(listen_port)
-        .ok_or_else(|| DeriveError::UnsupportedSpec {
+        .ok_or_else(|| DeriveError::DanglingBoundary {
             node: pod.node.name.clone(),
         })?;
     match &consumer.node.spec {
@@ -238,7 +244,7 @@ fn derive_listen(
 /// Walks the destination side of one pod, collecting into `points_at` every
 /// listener on another server this forwarding will dial.
 fn derive_destination(
-    index: &DeriveIndex<'_>,
+    index: &Index<'_>,
     node: &NodeWithPorts,
     visited: &mut Vec<String>,
     points_at: &mut Vec<ListenerCap>,
@@ -347,6 +353,7 @@ fn derive_destination(
             };
             derive_destination(index, source, visited, points_at)?
         }
+        // Boundary nodes are never reached: `Index::peer` resolves through them.
         NodeSpec::Pod(_)
         | NodeSpec::Entry(_)
         | NodeSpec::CanvasImport(_)
@@ -376,62 +383,5 @@ fn relay_protocol_name(protocol: EntityRelayProtocol) -> &'static str {
         EntityRelayProtocol::TcpRaw => "tcp_raw",
         EntityRelayProtocol::TcpTls => "tcp_tls",
         EntityRelayProtocol::Quic => "quic",
-    }
-}
-
-struct DeriveIndex<'a> {
-    owners: HashMap<String, &'a NodeWithPorts>,
-    ips: HashMap<String, &'a ServerIpRecordEntity>,
-    edges_by_port: HashMap<String, &'a crate::entities::surreal::connection::EdgeConnectionEntity>,
-}
-
-impl<'a> DeriveIndex<'a> {
-    fn build(topology: &'a CanvasTopology) -> Self {
-        let mut owners = HashMap::new();
-        for node in &topology.nodes {
-            for port in &node.ports {
-                owners.insert(record_key(&port.id.0), node);
-            }
-        }
-        let mut edges_by_port = HashMap::new();
-        for edge in &topology.edges {
-            edges_by_port.insert(record_key(&edge.source.0), edge);
-            edges_by_port.insert(record_key(&edge.target.0), edge);
-        }
-        Self {
-            owners,
-            ips: topology
-                .ips
-                .iter()
-                .map(|ip| (record_key(&ip.id.0), ip))
-                .collect(),
-            edges_by_port,
-        }
-    }
-
-    fn ip(&self, key: &str) -> Option<&'a ServerIpRecordEntity> {
-        self.ips.get(key).copied()
-    }
-
-    fn port_by_key(&self, node: &'a NodeWithPorts, key: &str) -> Option<&'a PortEntity> {
-        node.ports.iter().find(|p| p.key == key)
-    }
-
-    fn edge_on(
-        &self,
-        port: &PortEntity,
-    ) -> Option<&'a crate::entities::surreal::connection::EdgeConnectionEntity> {
-        self.edges_by_port.get(&record_key(&port.id.0)).copied()
-    }
-
-    fn peer(&self, port: &PortEntity) -> Option<&'a NodeWithPorts> {
-        let edge = self.edge_on(port)?;
-        let port_key = record_key(&port.id.0);
-        let other = if record_key(&edge.source.0) == port_key {
-            record_key(&edge.target.0)
-        } else {
-            record_key(&edge.source.0)
-        };
-        self.owners.get(&other).copied()
     }
 }
